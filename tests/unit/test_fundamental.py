@@ -22,7 +22,10 @@ AS_OF = date(2026, 10, 29)
 
 
 def _settings() -> Settings:
-    return load_settings()
+    base = load_settings()
+    return base.model_copy(
+        update={"fundamental": base.fundamental.model_copy(update={"use_consensus": True})}
+    )
 
 
 def _peg_rules() -> list[PegRule]:
@@ -275,4 +278,57 @@ def test_peg_floor_blocks_high_valuation_growth_stock() -> None:
     result = _score(data)
     assert result.raw_values["revenue_cagr"] == pytest.approx(0.10, abs=0.01)
     assert "PEG 赛道增速不达标" in result.tags
+    assert result.valuation == pytest.approx(3.5, abs=0.1)
+
+
+def test_consensus_uses_only_fy0_plus_two():
+    rows = (
+        ConsensusRow(fetch_date=AS_OF, fiscal_year=2027, np_forecast=125, analyst_count=5),
+        ConsensusRow(fetch_date=AS_OF, fiscal_year=2029, np_forecast=500, analyst_count=5),
+    )
+    result = build_snapshot(_data(consensus=rows), _settings(), AS_OF)
+    assert result.consensus_cagr == pytest.approx((125 / 80) ** 0.5 - 1)
+    result = build_snapshot(_data(consensus=rows[1:]), _settings(), AS_OF)
+    assert result.consensus_cagr is None
+
+
+def test_peer_pool_is_independent_of_candidates():
+    candidates = [_data("000001", roe=0.10, valuations=(), consensus=())]
+    peers = candidates + [_data("000002", roe=0.20, valuations=(), consensus=())]
+    result = score_fundamentals(candidates, _settings(), _peg_rules(), AS_OF, peer_data=peers)
+    assert result["000001"].percentiles["roe_avg"] == 0.0
+
+
+@pytest.mark.parametrize(("ocf", "expected"), [(1.0, 2.0), (-1.0, 0.0)])
+def test_negative_profit_uses_fixed_cashflow_score(ocf, expected):
+    financials = [
+        _row("002773", date(y, 12, 31), net_profit=-1, ocf=ocf) for y in (2023, 2024, 2025)
+    ]
+    snapshot = build_snapshot(_data(financials=financials), _settings(), AS_OF)
+    assert snapshot.ocf_fixed_score == expected
+    assert "经营现金流比率不适用" in snapshot.tags
+
+
+def test_industry_fallback_counts_valid_values_per_metric():
+    target = _data("000001", sw_l2="A", roe=0.1, valuations=(), consensus=())
+    missing = [
+        _data(f"0000{i:02}", sw_l2="A", roe=None, valuations=(), consensus=()) for i in range(2, 11)
+    ]
+    others = [
+        _data(f"0000{i:02}", sw_l2="B", roe=0.2, valuations=(), consensus=()) for i in range(11, 21)
+    ]
+    result = score_fundamentals(
+        [target], _settings(), _peg_rules(), AS_OF, peer_data=[target, *missing, *others]
+    )
+    assert result[target.stock.code].percentiles["roe_avg"] == 0.0
+
+
+def test_default_history_only_ignores_existing_forecast():
+    settings = load_settings()
+    assert settings.fundamental.use_consensus is False
+    result = _score(_data(consensus=_consensus()), settings)
+    assert result.raw_values["consensus_cagr"] is None
+    assert result.imputed["peg_unavailable"] is True
+    assert "PEG 暂未评分（按 0 分计入）" in result.tags
+    assert result.growth == pytest.approx(4.3, abs=0.1)
     assert result.valuation == pytest.approx(3.5, abs=0.1)

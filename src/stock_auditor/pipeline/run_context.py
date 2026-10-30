@@ -65,7 +65,11 @@ class RunContext:
         self.step_status[step] = f"failed: {message}"
 
     def finish(self) -> None:
-        self.status = _STATUS_SUCCESS
+        self.status = (
+            "partial"
+            if any(value.startswith("failed") for value in self.step_status.values())
+            else _STATUS_SUCCESS
+        )
         self.finished_at = datetime.now()
 
     def fail(self, message: str) -> None:

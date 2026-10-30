@@ -295,9 +295,7 @@ def test_cards_render_alert_and_button() -> None:
     )
     elements = main["body"]["elements"]
     assert any(item.get("tag") == "button" for item in elements)
-    detail = build_detail_card(
-        {"name": "测试甲", "code": "000001", "markdown": "**总分 80**"}
-    )
+    detail = build_detail_card({"name": "测试甲", "code": "000001", "markdown": "**总分 80**"})
     assert detail["body"]["elements"][0]["content"] == "**总分 80**"
     receipt = build_receipt_card(
         run_id=RUN_ID,
@@ -353,9 +351,7 @@ def test_weekly_report_ranks_by_quant_when_final_missing(
     connection: duckdb.DuckDBPyConnection, tmp_path, monkeypatch
 ) -> None:
     monkeypatch.setenv("SA_HOME", str(tmp_path))
-    connection.execute(
-        "UPDATE final_scores SET raw_total = NULL, final_total = NULL, stars = NULL"
-    )
+    connection.execute("UPDATE final_scores SET raw_total = NULL, final_total = NULL, stars = NULL")
     report = build_weekly_report(connection, RUN_ID, as_of=AS_OF, push=False)
 
     assert report.payload["ranked_by"] == "quant"
@@ -384,9 +380,7 @@ def test_weekly_push_uploads_chart_image(
     assert len(channel.uploads) == 1
     assert channel.uploads[0] == report.chart_path
     main = channel.cards[0]
-    images = [
-        item for item in main["body"]["elements"] if item.get("tag") == "img"
-    ]
+    images = [item for item in main["body"]["elements"] if item.get("tag") == "img"]
     assert images
     assert images[0]["img_key"] == "img_test"
 
@@ -406,7 +400,25 @@ def test_weekly_push_survives_chart_upload_failure(
 
     assert report.pushed is True
     assert len(channel.cards) == 3
-    assert all(
-        item.get("tag") != "img"
-        for item in channel.cards[0]["body"]["elements"]
+    assert all(item.get("tag") != "img" for item in channel.cards[0]["body"]["elements"])
+
+
+def test_weekly_reports_missing_peg_for_affected_stocks(connection, tmp_path, monkeypatch):
+    monkeypatch.setenv("SA_HOME", str(tmp_path))
+    connection.execute(
+        "UPDATE quant_scores SET is_imputed = ? WHERE run_id = ? AND code = '000001'",
+        [json.dumps({"peg_unavailable": True}), RUN_ID],
     )
+    channel = RecordingChannel()
+    report = build_weekly_report(connection, RUN_ID, as_of=AS_OF, push=True, channel=channel)
+    assert report.payload["top"][0]["peg_unavailable"] is True
+    assert "000001" in report.markdown
+    assert "PEG 暂未评分（按 0 分计入）" in report.markdown
+    assert "PEG 暂未评分（按 0 分计入）" in json.dumps(channel.cards, ensure_ascii=False)
+
+
+def test_weekly_does_not_report_missing_peg_without_marker(connection, tmp_path, monkeypatch):
+    monkeypatch.setenv("SA_HOME", str(tmp_path))
+    report = build_weekly_report(connection, RUN_ID, as_of=AS_OF, push=False)
+    assert report.payload["top"][0]["peg_unavailable"] is False
+    assert "PEG 暂未评分" not in report.markdown

@@ -106,6 +106,10 @@ class DataClient:
         self._max_retries = ingest.max_retries
         self._backoff = ingest.retry_backoff_seconds
         self._last_call = 0.0
+        self.failures: dict[str, dict[str, str]] = {}
+
+    def record_failure(self, source: str, code: str, exc: Exception) -> None:
+        self.failures.setdefault(source, {})[code] = str(exc)
 
     def _wait(self) -> None:
         elapsed = time.monotonic() - self._last_call

@@ -58,12 +58,12 @@ def collect_earnings(
         label = period_label(quarter_end)
         try:
             frame = client.call(
-                lambda period=label: _ak().stock_report_disclosure(
-                    market="沪深京", period=period
-                ),
+                lambda period=label: _ak().stock_report_disclosure(market="沪深京", period=period),
                 description=f"预约披露 {label}",
             )
         except Exception as exc:  # noqa: BLE001 - 未发布期间失败不阻塞
+            if hasattr(client, "record_failure"):
+                client.record_failure("earnings_calendar", label, exc)
             log.warning("ingest.earnings.failed", period=label, error=str(exc))
             continue
         if frame is None or getattr(frame, "empty", False):

@@ -63,6 +63,7 @@ class FundamentalSnapshot:
     debt_ratio: float | None
     receivable_growth_gap: float | None
     tags: tuple[str, ...] = ()
+    ocf_fixed_score: float | None = None
 
 
 @dataclass(frozen=True)
@@ -121,15 +122,12 @@ def _consensus_cagr(
         and row.np_forecast > 0
         and (row.analyst_count or 0) >= settings.fundamental.min_analyst_count
     }
-    if len(forecasts) < 2:
-        return None
     base = annual[-1].net_profit_parent
     base_year = annual[-1].report_period.year
-    end_year = max(forecasts)
-    years = end_year - base_year
-    if years <= 0:
+    end_year = base_year + 2
+    if end_year not in forecasts:
         return None
-    return cagr(forecasts[end_year], base, years)
+    return cagr(forecasts[end_year], base, 2)
 
 
 def _revenue_cagr(annual: Sequence[FinancialRow], years: int) -> float | None:
@@ -190,9 +188,7 @@ def build_snapshot(
     periods = sorted(rows)
     latest_period = periods[-1] if periods else None
 
-    revenue_growth_ttm = (
-        ttm_growth(rows, latest_period, "revenue") if latest_period else None
-    )
+    revenue_growth_ttm = ttm_growth(rows, latest_period, "revenue") if latest_period else None
     profit_growth_ttm = (
         ttm_growth(rows, latest_period, "net_profit_parent") if latest_period else None
     )
@@ -206,11 +202,26 @@ def build_snapshot(
     pb = latest_valuation.pb if latest_valuation else None
     ps_ttm = latest_valuation.ps_ttm if latest_valuation else None
 
-    tags: list[str] = []
+    tags: list[str] = ["质押数据不全：控股股东质押硬 Veto 已停用"]
+    window = _last_annuals(annual, 3)
+    fixed_ocf = None
+    if (
+        len(window) == 3
+        and all(r.net_profit_parent is not None and r.ocf is not None for r in window)
+        and sum(r.net_profit_parent for r in window) <= 0
+    ):
+        fixed_ocf = 2.0 if sum(r.ocf for r in window) > 0 else 0.0
+        tags.append("经营现金流比率不适用")
     if pe_ttm is not None and pe_ttm <= 0:
         tags.append("亏损股，用市销率")
-    if _consensus_cagr(data.consensus, annual, settings, as_of) is None:
+    consensus_cagr = (
+        _consensus_cagr(data.consensus, annual, settings, as_of)
+        if settings.fundamental.use_consensus
+        else None
+    )
+    if consensus_cagr is None:
         tags.append("无一致预期")
+        tags.append("PEG 暂未评分（按 0 分计入）")
 
     return FundamentalSnapshot(
         code=data.stock.code,
@@ -220,22 +231,19 @@ def build_snapshot(
         roic_avg=mean([row.roic for row in _last_annuals(annual, 3)]),
         revenue_growth_ttm=revenue_growth_ttm,
         profit_growth_ttm=profit_growth_ttm,
-        consensus_cagr=_consensus_cagr(data.consensus, annual, settings, as_of),
+        consensus_cagr=consensus_cagr,
         revenue_cagr=_revenue_cagr(annual, settings.fundamental.revenue_cagr_years),
         pe_ttm=pe_ttm,
         pb=pb,
         ps_ttm=ps_ttm,
-        pe_history_pct=_history_percentile(
-            valuations, "pe_ttm", pe_ttm, settings, as_of
-        ),
+        pe_history_pct=_history_percentile(valuations, "pe_ttm", pe_ttm, settings, as_of),
         pb_history_pct=_history_percentile(valuations, "pb", pb, settings, as_of),
-        ps_history_pct=_history_percentile(
-            valuations, "ps_ttm", ps_ttm, settings, as_of
-        ),
+        ps_history_pct=_history_percentile(valuations, "ps_ttm", ps_ttm, settings, as_of),
         ocf_to_profit=_ocf_to_profit(annual),
         debt_ratio=_debt_ratio(annual),
         receivable_growth_gap=_receivable_growth_gap(annual),
         tags=tuple(tags),
+        ocf_fixed_score=fixed_ocf,
     )
 
 
@@ -273,9 +281,7 @@ def _industry_percentiles(
     for code, snapshot in snapshots.items():
         value = getattr(snapshot, metric)
         percentiles[code] = (
-            percentile_rank(value, groups.get(keys[code], []))
-            if value is not None
-            else None
+            percentile_rank(value, groups.get(keys[code], [])) if value is not None else None
         )
     return percentiles
 
@@ -302,8 +308,7 @@ def _peg_score(
     )
     cap = rule.peg_cap if rule is not None else settings.fundamental.default_peg_cap
     if rule is not None and (
-        snapshot.revenue_cagr is None
-        or snapshot.revenue_cagr < rule.revenue_cagr_min
+        snapshot.revenue_cagr is None or snapshot.revenue_cagr < rule.revenue_cagr_min
     ):
         return 0.0
     peg = snapshot.pe_ttm / (snapshot.consensus_cagr * 100)
@@ -380,6 +385,8 @@ def _score_one(
         valuation_imputed = True
     pb_score = (1 - pb_pct) * 3
 
+    if snapshot.consensus_cagr is None:
+        imputed["peg_unavailable"] = True
     peg_score = _peg_score(snapshot, settings, peg_rules)
     valuation = pe_score + pb_score + peg_score
     if valuation_imputed:
@@ -387,10 +394,14 @@ def _score_one(
         imputed["valuation_subitem"] = True
 
     health_imputed_before = len(imputed)
-    ocf_pct = percentile_of("ocf_to_profit")
+    ocf_score = (
+        snapshot.ocf_fixed_score
+        if snapshot.ocf_fixed_score is not None
+        else percentile_of("ocf_to_profit") * 4
+    )
     debt_pct = percentile_of("debt_ratio")
     receivable_pct = percentile_of("receivable_growth_gap")
-    health = ocf_pct * 4 + (1 - debt_pct) * 3 + (1 - receivable_pct) * 3
+    health = ocf_score + (1 - debt_pct) * 3 + (1 - receivable_pct) * 3
     if len(imputed) > health_imputed_before:
         health *= discount
         imputed["health_subitem"] = True
@@ -416,10 +427,7 @@ def _score_one(
         and snapshot.pe_ttm > 0
         and snapshot.consensus_cagr is not None
         and snapshot.consensus_cagr > 0
-        and (
-            snapshot.revenue_cagr is None
-            or snapshot.revenue_cagr < rule.revenue_cagr_min
-        )
+        and (snapshot.revenue_cagr is None or snapshot.revenue_cagr < rule.revenue_cagr_min)
     ):
         tags.append("PEG 赛道增速不达标")
 
@@ -466,19 +474,41 @@ def score_fundamentals(
     settings: Settings,
     peg_rules: Sequence[PegRule],
     as_of: date,
+    *,
+    peer_data: Sequence[StockData] | None = None,
 ) -> dict[str, FundamentalResult]:
     """批量计算，保证行业分位在候选池内一致。"""
-    snapshots = {
-        data.stock.code: build_snapshot(data, settings, as_of) for data in data_list
-    }
-    if not snapshots:
+    targets = {data.stock.code: build_snapshot(data, settings, as_of) for data in data_list}
+    peers = peer_data if peer_data is not None else data_list
+    snapshots = {data.stock.code: build_snapshot(data, settings, as_of) for data in peers}
+    if not targets:
         return {}
-    keys = _industry_keys(snapshots, settings.fundamental.min_industry_sample)
-    percentiles = {
-        metric: _industry_percentiles(snapshots, keys, metric)
-        for metric in _PEER_METRICS
-    }
+    percentiles = {}
+    for metric in _PEER_METRICS:
+        groups_l1: dict[str, list[float]] = {}
+        groups_l2: dict[tuple[str | None, str], list[float]] = {}
+        all_values: list[float] = []
+        for snapshot in snapshots.values():
+            value = getattr(snapshot, metric)
+            if value is None:
+                continue
+            all_values.append(value)
+            if snapshot.sw_l1:
+                groups_l1.setdefault(snapshot.sw_l1, []).append(value)
+            if snapshot.sw_l2:
+                groups_l2.setdefault((snapshot.sw_l1, snapshot.sw_l2), []).append(value)
+        values = {}
+        for code, snapshot in targets.items():
+            value = getattr(snapshot, metric)
+            l2 = groups_l2.get((snapshot.sw_l1, snapshot.sw_l2), [])
+            group = (
+                l2
+                if len(l2) >= settings.fundamental.min_industry_sample
+                else groups_l1.get(snapshot.sw_l1, all_values)
+            )
+            values[code] = percentile_rank(value, group) if value is not None else None
+        percentiles[metric] = values
     return {
         code: _score_one(snapshot, percentiles, settings, peg_rules)
-        for code, snapshot in snapshots.items()
+        for code, snapshot in targets.items()
     }

@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import re
 from datetime import date, timedelta
 from typing import Any
 
 import duckdb
+import pdfplumber
+import requests
 import structlog
 
 from stock_auditor.config import Settings
@@ -31,7 +34,9 @@ ON CONFLICT (ann_id) DO UPDATE SET
     ann_date = excluded.ann_date,
     title = excluded.title,
     category = excluded.category,
-    url = excluded.url
+    url = excluded.url,
+    text = COALESCE(excluded.text, announcements.text),
+    text_hash = COALESCE(excluded.text_hash, announcements.text_hash)
 """
 
 
@@ -102,10 +107,10 @@ def collect_announcements(
     for raw_code in codes:
         code = normalize_code(raw_code)
         try:
-            rows.extend(
-                fetch_announcement_rows(client, code, begin_text, end_text)
-            )
+            rows.extend(fetch_announcement_rows(client, code, begin_text, end_text))
         except Exception as exc:  # noqa: BLE001 - 单只失败不阻塞整批
+            if hasattr(client, "record_failure"):
+                client.record_failure("announcements", code, exc)
             log.error("ingest.announcements.failed", code=code, error=str(exc))
     log.info("ingest.announcements.collected", rows=len(rows))
     return rows
@@ -120,3 +125,67 @@ def store_announcements(
         return 0
     connection.executemany(_UPSERT_SQL, rows)
     return len(rows)
+
+
+def fetch_pdf_text(ann_id: str) -> str:
+    """Download an Eastmoney PDF by its validated announcement ID."""
+    if not re.fullmatch(r"AN\d+", ann_id):
+        raise ValueError("unsupported announcement ID")
+    url = f"https://pdf.dfcfw.com/pdf/H2_{ann_id}_1.pdf"
+    with requests.get(url, timeout=(10, 30), stream=True, allow_redirects=False) as response:
+        response.raise_for_status()
+        chunks = []
+        size = 0
+        for chunk in response.iter_content(65536):
+            size += len(chunk)
+            if size > 20 * 1024 * 1024:
+                raise ValueError("announcement PDF exceeds 20 MiB")
+            chunks.append(chunk)
+    content = b"".join(chunks)
+    if not content.startswith(b"%PDF-"):
+        raise ValueError("announcement response is not a PDF")
+    with pdfplumber.open(io.BytesIO(content)) as pdf:
+        text = "\n".join((page.extract_text() or "") for page in pdf.pages[:80]).strip()
+    if len(text) < 100:
+        raise ValueError("announcement PDF contains insufficient extractable text")
+    return text[:200000]
+
+
+def backfill_announcement_text(
+    connection: duckdb.DuckDBPyConnection, client: DataClient, *, limit: int = 100
+) -> tuple[int, dict[str, str]]:
+    connection.execute(
+        "CREATE TABLE IF NOT EXISTS announcement_text_attempts "
+        "(ann_id VARCHAR PRIMARY KEY, attempts INTEGER NOT NULL, last_error VARCHAR)"
+    )
+    rows = connection.execute(
+        "SELECT a.ann_id FROM announcements a "
+        "LEFT JOIN announcement_text_attempts t ON a.ann_id = t.ann_id "
+        "WHERE a.text IS NULL OR length(trim(a.text)) < 100 "
+        "ORDER BY COALESCE(t.attempts, 0), a.ann_date DESC, a.ann_id LIMIT ?",
+        [limit],
+    ).fetchall()
+    failures = {}
+    success = 0
+    for (ann_id,) in rows:
+        try:
+            body = client.call(
+                lambda value=ann_id: fetch_pdf_text(value), description=f"公告正文 {ann_id}"
+            )
+            digest = hashlib.sha256(body.encode("utf-8")).hexdigest()
+            connection.execute(
+                "UPDATE announcements SET text = ?, text_hash = ? WHERE ann_id = ?",
+                [body, digest, ann_id],
+            )
+            success += 1
+        except Exception as exc:
+            failures[ann_id] = str(exc)
+            connection.execute(
+                "INSERT INTO announcement_text_attempts VALUES (?, 1, ?) "
+                "ON CONFLICT (ann_id) DO UPDATE SET "
+                "attempts = announcement_text_attempts.attempts + 1, "
+                "last_error = excluded.last_error",
+                [ann_id, str(exc)],
+            )
+            log.warning("ingest.announcement_text.failed", ann_id=ann_id, error=str(exc))
+    return success, failures

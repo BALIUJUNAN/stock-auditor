@@ -193,7 +193,7 @@ def check_hard_veto(data: StockData, settings: Settings, as_of: date) -> list[Ve
     checks = [
         _check_investigation(data.announcements, settings),
         _check_regulatory_penalty(data.announcements, settings, as_of),
-        _check_pledge(data, settings, as_of),
+        # Disabled until pledge data has verified controlling-shareholder provenance.
         _check_cash_debt(data, settings, as_of),
         _check_receivable_inflation(data, settings, as_of),
     ]

@@ -12,7 +12,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -33,7 +33,6 @@ from stock_auditor.llm.audit import LlmCompleter
 from stock_auditor.pipeline.core import core_pool
 from stock_auditor.pipeline.earnings import (
     EarningsWarning,
-    build_recalc_card,
     build_warning_card,
     check_earnings,
     recompute_due,
@@ -41,6 +40,7 @@ from stock_auditor.pipeline.earnings import (
 )
 from stock_auditor.pipeline.loader import load_universe
 from stock_auditor.pipeline.lock import FileLock
+from stock_auditor.pipeline.outbox import deliver, enqueue, pending_count
 from stock_auditor.pipeline.run_context import RunContext
 from stock_auditor.pipeline.single import StockReview, review_stock
 from stock_auditor.report.cards import build_alert_card
@@ -175,9 +175,7 @@ def _prune_announcements(keys: set[str], cutoff: date) -> list[str]:
     kept = [
         key
         for key in keys
-        if len(key.split("|")) == 3
-        and _key_date(key) is not None
-        and _key_date(key) >= cutoff
+        if len(key.split("|")) == 3 and _key_date(key) is not None and _key_date(key) >= cutoff
     ]
     return sorted(kept)[-_MAX_ANNOUNCEMENT_KEYS:]
 
@@ -281,19 +279,14 @@ def _review_summary(review: StockReview) -> str:
             stars = "★" * final.stars if final.stars else "—"
             suffix = "（黄牌）" if final.is_yellow else ""
             lines.append(f"**综合**：{final.final_total:g} 分 · {stars}{suffix}")
-    lines.append(
-        f"**审计**：{_AUDIT_LABELS.get(review.audit_status, review.audit_status)}"
-    )
+    lines.append(f"**审计**：{_AUDIT_LABELS.get(review.audit_status, review.audit_status)}")
     if review.tier2 is not None:
         lines.append("**看空理由**")
         lines.extend(
-            f"- {item.text}（{', '.join(item.fact_ids)}）"
-            for item in review.tier2.bear_points[:2]
+            f"- {item.text}（{', '.join(item.fact_ids)}）" for item in review.tier2.bear_points[:2]
         )
         if review.tier2.risk_tags:
-            tags = "、".join(
-                f"{item.tag}({item.severity})" for item in review.tier2.risk_tags
-            )
+            tags = "、".join(f"{item.tag}({item.severity})" for item in review.tier2.risk_tags)
             lines.append(f"**风险标签**：{tags}")
     if review.warnings:
         lines.extend(f"- {warning}" for warning in review.warnings)
@@ -365,6 +358,7 @@ def run_daily(
     ignored_path: Path | None = None,
     earnings_state_file: Path | None = None,
     ingest: Callable[..., Any] | None = None,
+    ingest_errors: Mapping[str, str] | None = None,
     use_lock: bool = True,
 ) -> DailyResult:
     """执行每日流水线：核心池异动告警 + 财报提醒与 T+1 重算。"""
@@ -373,6 +367,8 @@ def run_daily(
     lock = FileLock(PIPELINE) if use_lock else _NullLock()
     with lock:
         context = RunContext.start(PIPELINE, now=moment)
+        if ingest_errors:
+            context.fail_step("D0", str(dict(ingest_errors)))
         context.save(connection)
         log.info("pipeline.daily.start", run_id=context.run_id)
 
@@ -391,13 +387,9 @@ def run_daily(
 
         try:
             context.begin_step("D1")
-            pool = core_pool(
-                connection, settings, as_of=run_date, codes=codes
-            )
+            pool = core_pool(connection, settings, as_of=run_date, codes=codes)
             state = _load_state(state_file)
-            ignored_set = set(
-                ignored_codes(path=ignored_path, as_of=run_date)
-            )
+            ignored_set = set(ignored_codes(path=ignored_path, as_of=run_date))
             found = _scan_triggers(
                 connection,
                 settings,
@@ -447,9 +439,7 @@ def run_daily(
 
             context.begin_step("D3")
             try:
-                earnings_warnings = check_earnings(
-                    connection, settings, pool, as_of=run_date
-                )
+                earnings_warnings = check_earnings(connection, settings, pool, as_of=run_date)
                 due = recompute_due(
                     connection,
                     pool,
@@ -470,30 +460,16 @@ def run_daily(
                         state_file=earnings_state_file,
                         ingest=ingest,
                         use_lock=False,
+                        queue_notifications=push,
                     )
                     earnings_warnings = earnings_result.warnings
                     earnings_recalculated = earnings_result.recalculated
+                    if len(earnings_result.reviews) < len(earnings_result.due):
+                        raise RuntimeError("部分财报重算失败")
                     context.add_usage(
-                        sum(
-                            review.llm_tokens
-                            for review in earnings_result.reviews.values()
-                        ),
-                        sum(
-                            review.llm_cost
-                            for review in earnings_result.reviews.values()
-                        ),
+                        sum(review.llm_tokens for review in earnings_result.reviews.values()),
+                        sum(review.llm_cost for review in earnings_result.reviews.values()),
                     )
-                    for item in earnings_result.due:
-                        review = earnings_result.reviews.get(item.code)
-                        if review is not None:
-                            cards.append(
-                                build_recalc_card(
-                                    review,
-                                    item,
-                                    as_of=run_date,
-                                    channel=target_channel,
-                                )
-                            )
                 if earnings_warnings:
                     cards.append(build_warning_card(earnings_warnings))
                 context.complete_step("D3")
@@ -506,9 +482,17 @@ def run_daily(
                 )
 
             context.begin_step("D4")
-            pushed = _send(target_channel, cards) if push else 0
-            _save_state(state, state_file)
-            context.complete_step("D4")
+            if push:
+                for card in cards:
+                    payload = json.dumps(card, ensure_ascii=False, sort_keys=True)
+                    enqueue(connection, card, key=f"daily:{run_date}:{payload}")
+                pushed = deliver(connection, target_channel)
+            if not context.step_status.get("D2", "").startswith("failed"):
+                _save_state(state, state_file)
+            if push and pending_count(connection):
+                context.fail_step("D4", "告警待投递，将在下次运行重试")
+            else:
+                context.complete_step("D4")
         except KeyboardInterrupt:
             context.fail("用户中断")
             context.save(connection)

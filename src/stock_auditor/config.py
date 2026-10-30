@@ -112,6 +112,7 @@ class FundamentalSettings(_ConfigModel):
     revenue_cagr_years: int = Field(ge=1)
     history_min_valid_days: int = Field(ge=1)
     consensus_source: str
+    use_consensus: bool = False
     percentile_method: PercentileMethod
 
 

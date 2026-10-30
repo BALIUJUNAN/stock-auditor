@@ -10,10 +10,6 @@ import structlog
 from stock_auditor.config import Settings
 from stock_auditor.ingest.common import (
     DataClient,
-    clean_number,
-    frame_records,
-    normalize_code,
-    to_date,
 )
 
 log = structlog.get_logger(__name__)
@@ -48,45 +44,7 @@ def collect_pledge(
     settings: Settings,
     codes: list[str] | None,
 ) -> list[tuple[Any, ...]]:
-    """抓取最近一期质押快照，按目标代码过滤。"""
-    allowed = {normalize_code(code) for code in codes} if codes is not None else None
-    frame = None
-    used_date: date | None = None
-    for candidate in candidate_snapshot_dates(
-        date.today(), settings.ingest.pledge_snapshot_lookback_days
-    ):
-        text = candidate.strftime("%Y%m%d")
-        result = client.call(
-            lambda value=text: _ak().stock_gpzy_pledge_ratio_em(date=value),
-            description=f"质押快照 {text}",
-        )
-        records = frame_records(result)
-        if records:
-            frame = records
-            used_date = candidate
-            break
-    if frame is None:
-        log.warning(
-            "ingest.pledge.empty",
-            lookback_days=settings.ingest.pledge_snapshot_lookback_days,
-        )
-        return []
-
-    rows: list[tuple[Any, ...]] = []
-    for record in frame:
-        raw_code = record.get("股票代码")
-        if raw_code is None:
-            continue
-        try:
-            code = normalize_code(raw_code)
-        except ValueError:
-            continue
-        if allowed is not None and code not in allowed:
-            continue
-        ratio = clean_number(record.get("质押比例"))
-        if ratio is None:
-            continue
-        row_date = to_date(record.get("交易日期")) or used_date
-        rows.append((code, row_date, ratio / 100.0))
-    log.info("ingest.pledge.collected", rows=len(rows), snapshot=str(used_date))
-    return rows
+    """Unavailable: the upstream market-wide ratio is not the B3 metric."""
+    del client, settings, codes
+    log.warning("ingest.pledge.unavailable", reason="missing controlling-holder detail")
+    return []

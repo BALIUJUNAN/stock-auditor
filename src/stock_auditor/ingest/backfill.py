@@ -26,7 +26,6 @@ from stock_auditor.ingest import (
     financials,
     index,
     industry,
-    pledge,
     quotes,
     research,
     universe,
@@ -97,9 +96,7 @@ class BackfillState:
         self._path.parent.mkdir(parents=True, exist_ok=True)
         payload = {
             "fingerprint": self._fingerprint,
-            "completed": {
-                name: sorted(codes) for name, codes in self._completed.items()
-            },
+            "completed": {name: sorted(codes) for name, codes in self._completed.items()},
         }
         temporary = self._path.with_suffix(self._path.suffix + ".tmp")
         temporary.write_text(
@@ -126,9 +123,7 @@ def _fingerprint(settings: Settings) -> str:
         "research_lookback_days": settings.ingest.research_lookback_days,
         "research_max_pages": settings.ingest.research_max_pages,
     }
-    digest = hashlib.sha256(
-        json.dumps(payload, sort_keys=True).encode("utf-8")
-    ).hexdigest()
+    digest = hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()
     return digest[:16]
 
 
@@ -206,9 +201,7 @@ def run_backfill(
 
     codes = [
         row[0]
-        for row in connection.execute(
-            "SELECT code FROM stock_universe ORDER BY code"
-        ).fetchall()
+        for row in connection.execute("SELECT code FROM stock_universe ORDER BY code").fetchall()
     ]
     if not codes:
         return summary
@@ -230,21 +223,15 @@ def run_backfill(
     quote_start = today - timedelta(days=backfill_days)
     valuation_start = today - timedelta(days=backfill_days)
     research_cutoff = today - timedelta(days=settings.ingest.research_lookback_days)
-    announcement_begin = today - timedelta(
-        days=settings.ingest.announcement_lookback_days
-    )
+    announcement_begin = today - timedelta(days=settings.ingest.announcement_lookback_days)
     begin_text = announcement_begin.strftime("%Y%m%d")
     end_text = today.strftime("%Y%m%d")
 
     steps = [
         StockStep(
             name="daily_quotes",
-            fetch=lambda code: quotes.fetch_quote_rows(
-                data_client, code, quote_start, today
-            ),
-            store=lambda rows: upsert_rows(
-                connection, "daily_quotes", quotes.QUOTE_COLUMNS, rows
-            ),
+            fetch=lambda code: quotes.fetch_quote_rows(data_client, code, quote_start, today),
+            store=lambda rows: upsert_rows(connection, "daily_quotes", quotes.QUOTE_COLUMNS, rows),
         ),
         StockStep(
             name="financials",
@@ -257,9 +244,7 @@ def run_backfill(
         ),
         StockStep(
             name="valuation_daily",
-            fetch=lambda code: valuation.fetch_valuation_rows(
-                data_client, code, valuation_start
-            ),
+            fetch=lambda code: valuation.fetch_valuation_rows(data_client, code, valuation_start),
             store=lambda rows: upsert_rows(
                 connection, "valuation_daily", valuation.VALUATION_COLUMNS, rows
             ),
@@ -289,21 +274,7 @@ def run_backfill(
     backfill_stocks(codes, steps, state, summary)
 
     index_settings = settings.model_copy(
-        update={
-            "ingest": settings.ingest.model_copy(
-                update={"daily_lookback_days": backfill_days}
-            )
-        }
-    )
-    _run_market_step(
-        summary,
-        "pledge",
-        lambda: upsert_rows(
-            connection,
-            "pledge",
-            pledge.PLEDGE_COLUMNS,
-            pledge.collect_pledge(data_client, settings, codes),
-        ),
+        update={"ingest": settings.ingest.model_copy(update={"daily_lookback_days": backfill_days})}
     )
     _run_market_step(
         summary,

@@ -139,9 +139,9 @@ def fetch_financial_rows(
             _number(balance_row, "BOND_PAYABLE"),
             _number(balance_row, "SHORT_BOND_PAYABLE"),
         )
-        ann_date = (
-            to_date(metric_row.get("NOTICE_DATE")) if metric_row else None
-        ) or (to_date(balance_row.get("NOTICE_DATE")) if balance_row else None)
+        ann_date = (to_date(metric_row.get("NOTICE_DATE")) if metric_row else None) or (
+            to_date(balance_row.get("NOTICE_DATE")) if balance_row else None
+        )
 
         rows.append(
             (
@@ -174,10 +174,13 @@ def collect_financials(
     for raw_code in codes:
         code = normalize_code(raw_code)
         try:
-            rows.extend(
-                fetch_financial_rows(client, code, settings.ingest.financial_periods)
-            )
+            collected = fetch_financial_rows(client, code, settings.ingest.financial_periods)
+            if not collected:
+                raise ValueError("no data returned")
+            rows.extend(collected)
         except Exception as exc:  # noqa: BLE001 - 单只失败不阻塞整批
+            if hasattr(client, "record_failure"):
+                client.record_failure("financials", code, exc)
             log.error("ingest.financials.failed", code=code, error=str(exc))
     log.info("ingest.financials.collected", rows=len(rows))
     return rows

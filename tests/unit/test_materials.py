@@ -25,11 +25,7 @@ AS_OF = date(2026, 10, 29)
 def _settings(budget: int = 60000) -> Settings:
     base = load_settings()
     return base.model_copy(
-        update={
-            "llm": base.llm.model_copy(
-                update={"tier1_input_token_budget": budget}
-            )
-        }
+        update={"llm": base.llm.model_copy(update={"tier1_input_token_budget": budget})}
     )
 
 
@@ -124,9 +120,7 @@ def test_budget_truncates_the_boundary_material() -> None:
 
 
 def test_zero_budget_drops_everything() -> None:
-    bundle = assemble_materials(
-        [_material(LEGAL, 1, "公告")], _settings(budget=1), as_of=AS_OF
-    )
+    bundle = assemble_materials([_material(LEGAL, 1, "公告")], _settings(budget=1), as_of=AS_OF)
     assert bundle.items == ()
     assert bundle.dropped == 1
 
@@ -161,9 +155,7 @@ def test_materials_from_announcements_uses_title_when_text_missing() -> None:
         AnnouncementRow(ann_date=None, title="无日期公告"),
     ]
     materials = materials_from_announcements(rows)
-    assert len(materials) == 1
-    assert materials[0].source_type == INQUIRY
-    assert materials[0].text == "关于问询函的回复公告"
+    assert materials == []
 
 
 def test_same_source_type_and_date_keeps_input_order() -> None:
@@ -177,9 +169,7 @@ def test_same_source_type_and_date_keeps_input_order() -> None:
 
 def test_token_budget_is_not_exceeded_for_whole_items() -> None:
     settings = _settings(budget=1000)
-    materials = [
-        _material(LEGAL, index, f"材料{index}" * 10) for index in range(10)
-    ]
+    materials = [_material(LEGAL, index, f"材料{index}" * 10) for index in range(10)]
     bundle = assemble_materials(materials, settings, as_of=AS_OF)
     estimate = settings.llm.token_estimate
     assert sum(estimate_tokens(item.text, estimate) for item in bundle.items) <= 1000

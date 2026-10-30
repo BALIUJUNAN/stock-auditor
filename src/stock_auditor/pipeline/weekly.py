@@ -204,9 +204,7 @@ def _restore_context(
         pipeline=str(pipeline),
         started_at=started_at,
         status="running",
-        step_status={
-            str(key): str(value) for key, value in dict(steps).items()
-        },
+        step_status={str(key): str(value) for key, value in dict(steps).items()},
         llm_tokens=int(tokens or 0),
         llm_cost=float(cost or 0.0),
     )
@@ -276,6 +274,7 @@ def _score(
     data_list: Sequence[StockData],
     settings: Settings,
     as_of: date,
+    peer_data: Sequence[StockData] | None = None,
 ) -> tuple[
     dict[str, FundamentalResult],
     dict[str, MomentumResult],
@@ -284,10 +283,8 @@ def _score(
     if not data_list:
         return {}, {}, {}
     peg_rules = load_industry_peg()
-    fundamentals = score_fundamentals(data_list, settings, peg_rules, as_of)
-    momentum = {
-        data.stock.code: score_momentum(data.quotes, settings) for data in data_list
-    }
+    fundamentals = score_fundamentals(data_list, settings, peg_rules, as_of, peer_data=peer_data)
+    momentum = {data.stock.code: score_momentum(data.quotes, settings) for data in data_list}
     data_flags = _data_flags(data_list, settings)
 
     rows = []
@@ -296,9 +293,7 @@ def _score(
         fund = fundamentals[code]
         mom = momentum[code]
         raw_values = dict(fund.raw_values)
-        raw_values.update(
-            {f"momentum_{key}": value for key, value in mom.raw.items()}
-        )
+        raw_values.update({f"momentum_{key}": value for key, value in mom.raw.items()})
         rows.append(
             QuantScore(
                 code=code,
@@ -413,8 +408,7 @@ def _load_veto_events(
 ) -> dict[str, list[VetoEvent]]:
     events: dict[str, list[VetoEvent]] = {}
     for code, rule, level, detail, penalty in connection.execute(
-        "SELECT code, rule, level, detail, penalty FROM veto_events "
-        "WHERE run_id = ?",
+        "SELECT code, rule, level, detail, penalty FROM veto_events WHERE run_id = ?",
         [run_id],
     ).fetchall():
         events.setdefault(str(code), []).append(
@@ -523,8 +517,7 @@ def _load_tier1_dossiers(
 ) -> dict[str, Tier1Dossier]:
     dossiers: dict[str, Tier1Dossier] = {}
     for code, payload in connection.execute(
-        "SELECT code, payload FROM tier1_dossiers "
-        "WHERE run_id = ? AND status = 'ok'",
+        "SELECT code, payload FROM tier1_dossiers WHERE run_id = ? AND status = 'ok'",
         [run_id],
     ).fetchall():
         data = _json_dict(payload)
@@ -539,8 +532,7 @@ def _load_tier2_scores(
 ) -> dict[str, Tier2Score]:
     scores: dict[str, Tier2Score] = {}
     for code, payload in connection.execute(
-        "SELECT code, payload FROM tier2_scores "
-        "WHERE run_id = ? AND status = 'ok'",
+        "SELECT code, payload FROM tier2_scores WHERE run_id = ? AND status = 'ok'",
         [run_id],
     ).fetchall():
         data = _json_dict(payload)
@@ -695,8 +687,7 @@ def _finalize(
         outlook = tier2_scores[code].score if code in tier2_scores else None
         risk_tags = tier2_scores[code].risk_tags if code in tier2_scores else []
         critical = any(
-            tag.severity == "critical" and tag.tag in ("疑似炒作", "叙事背离")
-            for tag in risk_tags
+            tag.severity == "critical" and tag.tag in ("疑似炒作", "叙事背离") for tag in risk_tags
         )
         data = universe.data.get(code)
         soft_events = (
@@ -758,9 +749,7 @@ def run_weekly(
             stored_as_of, stored_codes = _read_state(context.run_id)
             run_date = stored_as_of or context.started_at.date()
             codes = list(codes) if codes is not None else stored_codes
-            completed = {
-                step for step, status in context.step_status.items() if status == "done"
-            }
+            completed = {step for step, status in context.step_status.items() if status == "done"}
         else:
             run_date = as_of or date.today()
             context = RunContext.start(PIPELINE, now=now)
@@ -774,7 +763,6 @@ def run_weekly(
             resume=resume,
         )
 
-        universe = load_universe(connection, as_of=run_date, codes=codes)
         filter_results: dict[str, FilterResult] = {}
         veto_events: dict[str, list[VetoEvent]] = {}
         fundamentals: dict[str, FundamentalResult] = {}
@@ -801,6 +789,8 @@ def run_weekly(
                         settings,
                         codes=list(codes) if codes is not None else None,
                     )
+                    if summary.warnings.get("announcement_text"):
+                        context.fail_step("S1_data", summary.warnings["announcement_text"])
                     if summary.errors:
                         failed = "；".join(
                             f"{key}: {value}" for key, value in summary.errors.items()
@@ -809,6 +799,7 @@ def run_weekly(
 
                 _run_step(context, connection, "S1", step_refresh)
 
+            universe = load_universe(connection, as_of=run_date, codes=codes)
             if _reached("S2", target):
                 if "S2" in completed:
                     filter_results = _load_filter_results(connection, context.run_id)
@@ -820,9 +811,7 @@ def run_weekly(
                         "S2",
                         lambda: _stage0(universe, settings, run_date),
                     )
-                    store_filter_results(
-                        connection, context.run_id, filter_results.values()
-                    )
+                    store_filter_results(connection, context.run_id, filter_results.values())
                     store_veto_events(connection, context.run_id, veto_events)
 
             if _reached("S3", target):
@@ -836,6 +825,9 @@ def run_weekly(
                         for code, result in filter_results.items()
                         if result.passed
                     ]
+                    peer_universe = (
+                        load_universe(connection, as_of=run_date) if codes is not None else universe
+                    )
                     fundamentals, momentum, data_flags = _run_step(
                         context,
                         connection,
@@ -846,6 +838,13 @@ def run_weekly(
                             candidates,
                             settings,
                             run_date,
+                            [
+                                data
+                                for data in peer_universe.data.values()
+                                if not data.stock.is_st
+                                and data.stock.list_date is not None
+                                and (run_date - data.stock.list_date).days >= 365
+                            ],
                         ),
                     )
 
@@ -884,18 +883,16 @@ def run_weekly(
                         as_of=run_date,
                         rows=rows,
                         universe_count=len(universe.stocks),
-                        stage0_passed=sum(
-                            1 for result in filter_results.values() if result.passed
-                        ),
+                        stage0_passed=sum(1 for result in filter_results.values() if result.passed),
                         hard_veto=len(veto_events),
                         pool_count=len(pool),
                     )
                 else:
                     quant_check_path = paths.reports_dir() / "quant_check.md"
 
-            need_llm = (
-                _reached("S5", target) and "S5" not in completed
-            ) or (_reached("S6", target) and "S6" not in completed)
+            need_llm = (_reached("S5", target) and "S5" not in completed) or (
+                _reached("S6", target) and "S6" not in completed
+            )
             llm: LlmCompleter | None = None
             skipped_steps: set[str] = set()
             if need_llm:
@@ -1013,15 +1010,11 @@ def run_weekly(
 
         context.finish()
         context.save(connection)
-        audit_ok, audit_failed = (
-            (0, 0) if llm_skipped else _audit_counts(pool, tier2_scores)
-        )
+        audit_ok, audit_failed = (0, 0) if llm_skipped else _audit_counts(pool, tier2_scores)
         log.info(
             "pipeline.weekly.done",
             run_id=context.run_id,
-            stage0_passed=sum(
-                1 for result in filter_results.values() if result.passed
-            ),
+            stage0_passed=sum(1 for result in filter_results.values() if result.passed),
             pool=len(pool),
             audit_failed=audit_failed,
         )
@@ -1029,9 +1022,7 @@ def run_weekly(
             run_id=context.run_id,
             as_of=run_date,
             universe_count=len(universe.stocks),
-            stage0_passed_count=sum(
-                1 for result in filter_results.values() if result.passed
-            ),
+            stage0_passed_count=sum(1 for result in filter_results.values() if result.passed),
             hard_veto_count=len(veto_events),
             filter_results=filter_results,
             veto_events=veto_events,

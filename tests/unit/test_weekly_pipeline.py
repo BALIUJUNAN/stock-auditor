@@ -172,12 +172,8 @@ def _insert_stock(
         ],
     )
     connection.executemany(
-        "INSERT INTO valuation_daily (code, trade_date, pe_ttm, pb, ps_ttm) "
-        "VALUES (?, ?, ?, ?, ?)",
-        [
-            (code, AS_OF - timedelta(days=index), 15.0, 1.5, 1.2)
-            for index in range(700)
-        ],
+        "INSERT INTO valuation_daily (code, trade_date, pe_ttm, pb, ps_ttm) VALUES (?, ?, ?, ?, ?)",
+        [(code, AS_OF - timedelta(days=index), 15.0, 1.5, 1.2) for index in range(700)],
     )
     connection.execute(
         "INSERT INTO announcements (ann_id, code, ann_date, title, category, text) "
@@ -194,9 +190,7 @@ def _database(tmp_path: Path) -> duckdb.DuckDBPyConnection:
     return connection
 
 
-def test_full_pipeline_runs_s1_to_s8(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_full_pipeline_runs_s1_to_s8(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("SA_HOME", str(tmp_path))
     client = FakeClient(SCORES)
     with _database(tmp_path) as connection:
@@ -217,9 +211,7 @@ def test_full_pipeline_runs_s1_to_s8(
         assert result.audit_ok_count == 2
         assert result.audit_failed_count == 0
         assert set(result.final_scores) == {"000001", "000002"}
-        assert all(
-            item.final_total is not None for item in result.final_scores.values()
-        )
+        assert all(item.final_total is not None for item in result.final_scores.values())
 
         status, step_status, tokens = connection.execute(
             "SELECT status, step_status, llm_tokens FROM run_log WHERE run_id = ?",
@@ -237,6 +229,8 @@ def test_full_pipeline_runs_s1_to_s8(
         assert result.chart_path.exists()
         assert result.chart_path.read_bytes()[:8] == b"\x89PNG\r\n\x1a\n"
         markdown = result.report_path.read_text(encoding="utf-8")
+        assert "PEG 暂未评分（按 0 分计入）" in markdown
+        assert all(item.imputed.get("peg_unavailable") for item in result.fundamentals.values())
         assert "# 周报 weekly-20261029-200000" in markdown
         assert "测试甲" in markdown
         assert f"- 数据日期：{AS_OF}" in markdown
@@ -244,8 +238,7 @@ def test_full_pipeline_runs_s1_to_s8(
         assert "## 本周 Top 20" in markdown
 
         report_row = connection.execute(
-            "SELECT report_json, markdown, pushed_at FROM weekly_reports "
-            "WHERE run_id = ?",
+            "SELECT report_json, markdown, pushed_at FROM weekly_reports WHERE run_id = ?",
             [result.run_id],
         ).fetchone()
         assert report_row is not None
@@ -256,14 +249,20 @@ def test_full_pipeline_runs_s1_to_s8(
         assert report_row[1] == markdown
         assert report_row[2] is None
 
-        assert connection.execute(
-            "SELECT count(*) FROM tier1_dossiers WHERE run_id = ?",
-            [result.run_id],
-        ).fetchone()[0] == 2
-        assert connection.execute(
-            "SELECT count(*) FROM tier2_scores WHERE run_id = ?",
-            [result.run_id],
-        ).fetchone()[0] == 2
+        assert (
+            connection.execute(
+                "SELECT count(*) FROM tier1_dossiers WHERE run_id = ?",
+                [result.run_id],
+            ).fetchone()[0]
+            == 2
+        )
+        assert (
+            connection.execute(
+                "SELECT count(*) FROM tier2_scores WHERE run_id = ?",
+                [result.run_id],
+            ).fetchone()[0]
+            == 2
+        )
 
 
 def test_resume_after_s6_failure_reuses_finished_steps(
@@ -292,12 +291,18 @@ def test_resume_after_s6_failure_reuses_finished_steps(
         assert steps["S5"] == "done"
         assert steps["S6"].startswith("failed:")
         assert failing.calls == 3
-        assert connection.execute(
-            "SELECT count(*) FROM tier1_dossiers WHERE run_id = ?", [run_id]
-        ).fetchone()[0] == 2
-        assert connection.execute(
-            "SELECT count(*) FROM tier2_scores WHERE run_id = ?", [run_id]
-        ).fetchone()[0] == 0
+        assert (
+            connection.execute(
+                "SELECT count(*) FROM tier1_dossiers WHERE run_id = ?", [run_id]
+            ).fetchone()[0]
+            == 2
+        )
+        assert (
+            connection.execute(
+                "SELECT count(*) FROM tier2_scores WHERE run_id = ?", [run_id]
+            ).fetchone()[0]
+            == 0
+        )
 
         resumed_client = FakeClient(SCORES)
         result = run_weekly(
@@ -314,9 +319,7 @@ def test_resume_after_s6_failure_reuses_finished_steps(
         assert result.report_path is not None
         assert result.report_path.exists()
 
-        assert connection.execute(
-            "SELECT count(*) FROM run_log"
-        ).fetchone()[0] == 1
+        assert connection.execute("SELECT count(*) FROM run_log").fetchone()[0] == 1
         final_status, final_steps = connection.execute(
             "SELECT status, step_status FROM run_log WHERE run_id = ?", [run_id]
         ).fetchone()
@@ -342,15 +345,11 @@ def test_lock_prevents_concurrent_weekly_run(
             )
         assert connection.execute("SELECT count(*) FROM run_log").fetchone()[0] == 0
 
-    run_counts = list((tmp_path / "state").glob("*.json")) if (
-        tmp_path / "state"
-    ).exists() else []
+    run_counts = list((tmp_path / "state").glob("*.json")) if (tmp_path / "state").exists() else []
     assert run_counts == []
 
 
-def test_resume_without_failed_run_raises(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_resume_without_failed_run_raises(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("SA_HOME", str(tmp_path))
     with _database(tmp_path) as connection, pytest.raises(ValueError, match="没有可续跑"):
         run_weekly(
@@ -440,19 +439,16 @@ def test_resume_explicit_run_id_selects_that_run(
         )
 
         assert result.run_id == target_run_id
-        statuses = dict(
-            connection.execute("SELECT run_id, status FROM run_log").fetchall()
-        )
+        statuses = dict(connection.execute("SELECT run_id, status FROM run_log").fetchall())
         assert statuses[target_run_id] == "success"
         assert statuses[other_run_id] == "failed"
 
 
-def test_resume_unknown_run_id_raises(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_resume_unknown_run_id_raises(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("SA_HOME", str(tmp_path))
-    with _database(tmp_path) as connection, pytest.raises(
-        ValueError, match="找不到周流水线运行记录"
+    with (
+        _database(tmp_path) as connection,
+        pytest.raises(ValueError, match="找不到周流水线运行记录"),
     ):
         run_weekly(
             connection,
@@ -463,9 +459,7 @@ def test_resume_unknown_run_id_raises(
         )
 
 
-def test_resume_completed_run_id_raises(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_resume_completed_run_id_raises(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("SA_HOME", str(tmp_path))
     with _database(tmp_path) as connection:
         finished = run_weekly(
@@ -487,9 +481,7 @@ def test_resume_completed_run_id_raises(
             )
 
 
-def test_unknown_step_is_rejected(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_unknown_step_is_rejected(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("SA_HOME", str(tmp_path))
     with _database(tmp_path) as connection, pytest.raises(ValueError, match="不支持的步骤"):
         run_weekly(
@@ -501,3 +493,32 @@ def test_unknown_step_is_rejected(
             push=False,
             now=NOW,
         )
+
+
+def test_refresh_loads_universe_after_ingest(tmp_path, monkeypatch):
+    import stock_auditor.pipeline.weekly as weekly
+    from stock_auditor.ingest.service import IngestSummary
+
+    monkeypatch.setenv("SA_HOME", str(tmp_path))
+
+    def ingest(connection, settings, codes=None):
+        connection.execute(
+            "INSERT INTO stock_universe (code, name, board, list_date) "
+            "VALUES ('000001', 'Example', 'sz_main', DATE '2000-01-01')"
+        )
+        return IngestSummary()
+
+    monkeypatch.setattr(weekly, "run_ingest", ingest)
+    with duckdb.connect(":memory:") as connection:
+        apply_migrations(connection)
+        result = run_weekly(
+            connection,
+            load_settings(),
+            refresh=True,
+            until="S2",
+            as_of=AS_OF,
+            push=False,
+            use_lock=False,
+        )
+    assert result.universe_count == 1
+    assert "000001" in result.filter_results

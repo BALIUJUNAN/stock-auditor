@@ -22,6 +22,7 @@ from stock_auditor.llm.audit import LlmCompleter
 from stock_auditor.pipeline.core import core_pool
 from stock_auditor.pipeline.loader import load_universe
 from stock_auditor.pipeline.lock import FileLock
+from stock_auditor.pipeline.outbox import deliver, enqueue, pending_count
 from stock_auditor.pipeline.run_context import RunContext
 from stock_auditor.pipeline.single import StockReview, review_stock
 from stock_auditor.report.cards import build_alert_card, build_text_card
@@ -176,11 +177,7 @@ def recompute_due(
     """实际披露日在 ``as_of`` 之前、且尚未重算过的核心池股票。"""
     if not codes:
         return ()
-    done = {
-        str(item)
-        for item in _load_state(path).get("recomputed", [])
-        if isinstance(item, str)
-    }
+    done = {str(item) for item in _load_state(path).get("recomputed", []) if isinstance(item, str)}
     placeholders = ", ".join("?" for _ in codes)
     rows = connection.execute(
         "SELECT e.code, COALESCE(u.name, ''), e.report_period, e.actual_date "
@@ -214,9 +211,7 @@ def _quant_row(
     momentum: MomentumResult,
 ) -> QuantScore:
     raw_values = dict(fundamental.raw_values)
-    raw_values.update(
-        {f"momentum_{key}": value for key, value in momentum.raw.items()}
-    )
+    raw_values.update({f"momentum_{key}": value for key, value in momentum.raw.items()})
     return QuantScore(
         code=code,
         fundamental=fundamental.total,
@@ -250,9 +245,11 @@ def recalculate_stock(
 ) -> StockReview:
     """S1 单股刷新 → 全市场截面量化 → 该股 S5~S8。"""
     if ingest is not None:
-        ingest(connection, settings, [code])
+        summary = ingest(connection, settings, [code])
     else:
-        run_ingest(connection, settings, codes=[code])
+        summary = run_ingest(connection, settings, codes=[code])
+    if getattr(summary, "errors", None):
+        raise RuntimeError(f"财报重算数据刷新失败: {summary.errors}")
 
     universe = load_universe(connection, as_of=as_of)
     data = universe.data.get(code)
@@ -263,6 +260,13 @@ def recalculate_stock(
         settings,
         load_industry_peg(),
         as_of,
+        peer_data=[
+            item
+            for item in universe.data.values()
+            if not item.stock.is_st
+            and item.stock.list_date is not None
+            and (as_of - item.stock.list_date).days >= 365
+        ],
     )
     fundamental = fundamentals.get(code)
     if fundamental is None:
@@ -307,13 +311,10 @@ def _review_summary(review: StockReview) -> str:
     if review.tier2 is not None:
         lines.append("**看空理由**")
         lines.extend(
-            f"- {item.text}（{', '.join(item.fact_ids)}）"
-            for item in review.tier2.bear_points[:2]
+            f"- {item.text}（{', '.join(item.fact_ids)}）" for item in review.tier2.bear_points[:2]
         )
         if review.tier2.risk_tags:
-            tags = "、".join(
-                f"{item.tag}({item.severity})" for item in review.tier2.risk_tags
-            )
+            tags = "、".join(f"{item.tag}({item.severity})" for item in review.tier2.risk_tags)
             lines.append(f"**风险标签**：{tags}")
     if review.warnings:
         lines.extend(f"- {warning}" for warning in review.warnings)
@@ -395,6 +396,7 @@ def run_earnings(
     state_file: Path | None = None,
     ingest: IngestCallable | None = None,
     use_lock: bool = True,
+    queue_notifications: bool | None = None,
 ) -> EarningsResult:
     """手动执行财报流水线：提醒 + 对到期股票做 T+1 全量重算。"""
     moment = now or datetime.now()
@@ -416,12 +418,8 @@ def run_earnings(
         try:
             pool = core_pool(connection, settings, as_of=run_date, codes=codes)
             context.begin_step("E1")
-            warnings = check_earnings(
-                connection, settings, pool, as_of=run_date
-            )
-            due = recompute_due(
-                connection, pool, as_of=run_date, path=state_file
-            )
+            warnings = check_earnings(connection, settings, pool, as_of=run_date)
+            due = recompute_due(connection, pool, as_of=run_date, path=state_file)
             context.complete_step("E1")
 
             context.begin_step("E2")
@@ -448,23 +446,28 @@ def run_earnings(
                 context.add_usage(review.llm_tokens, review.llm_cost)
                 reviews[item.code] = review
                 recalculated.append(item.code)
+                card = build_recalc_card(review, item, as_of=run_date, channel=target_channel)
+                if queue_notifications if queue_notifications is not None else push:
+                    enqueue(connection, card, key=f"earnings:{item.key}")
                 mark_recomputed(item.key, path=state_file)
-                cards.append(
-                    build_recalc_card(
-                        review,
-                        item,
-                        as_of=run_date,
-                        channel=target_channel,
-                    )
-                )
+                cards.append(card)
             if "failed" not in context.step_status.get("E2", ""):
                 context.complete_step("E2")
 
             context.begin_step("E3")
             if warnings:
                 cards.append(build_warning_card(warnings))
-            pushed = _send(target_channel, cards) if push else 0
-            context.complete_step("E3")
+            if warnings and push:
+                enqueue(
+                    connection,
+                    cards[-1],
+                    key=f"earnings-warning:{run_date}:{','.join(item.code for item in warnings)}",
+                )
+            pushed = deliver(connection, target_channel) if push else 0
+            if push and pending_count(connection):
+                context.fail_step("E3", "告警待投递，将在下次运行重试")
+            else:
+                context.complete_step("E3")
         except KeyboardInterrupt:
             context.fail("用户中断")
             context.save(connection)

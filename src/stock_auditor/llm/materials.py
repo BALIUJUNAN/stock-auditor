@@ -109,12 +109,14 @@ def materials_from_announcements(
         if row.ann_date is None:
             continue
         body = (row.text or "").strip()
+        if len(body) < 100:
+            continue
         materials.append(
             MaterialInput(
                 source_type=classify_announcement(row.title, row.category),
                 date=row.ann_date,
                 title=row.title,
-                text=body or row.title,
+                text=body,
             )
         )
     return materials

@@ -186,7 +186,9 @@ def review_stock(
     dossier: Tier1Dossier | None = None
     tier2: Tier2Score | None = None
     audit_status = AUDIT_SKIPPED
-    warnings: list[str] = []
+    warnings: list[str] = ["质押数据不全：控股股东质押硬 Veto 已停用"]
+    if fundamental is not None and fundamental.imputed.get("peg_unavailable"):
+        warnings.append("一致预期未使用或缺失，PEG 暂未评分（按 0 分计入）")
     llm_tokens = 0
     llm_cost = 0.0
     if client is not None and fundamental is not None:
@@ -248,8 +250,7 @@ def review_stock(
     outlook = tier2.score if tier2 is not None else None
     risk_tags = tier2.risk_tags if tier2 is not None else []
     critical = any(
-        tag.severity == "critical" and tag.tag in ("疑似炒作", "叙事背离")
-        for tag in risk_tags
+        tag.severity == "critical" and tag.tag in ("疑似炒作", "叙事背离") for tag in risk_tags
     )
     soft_events = check_soft_downgrade(
         data,

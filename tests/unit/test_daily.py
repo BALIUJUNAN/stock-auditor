@@ -21,10 +21,7 @@ WEEKLY_RUN = "weekly-20261025-200000"
 
 
 def _bars(close: float, volume: float = 1_000_000.0) -> list[tuple[float, ...]]:
-    return [
-        (close, close, close * 0.98, close, volume, 100_000_000.0, 0.05)
-        for _ in range(80)
-    ]
+    return [(close, close, close * 0.98, close, volume, 100_000_000.0, 0.05) for _ in range(80)]
 
 
 def _insert_stock(
@@ -42,10 +39,7 @@ def _insert_stock(
     connection.executemany(
         "INSERT INTO daily_quotes (code, trade_date, open, high, low, close, "
         "volume, amount, turnover) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        [
-            (code, AS_OF - timedelta(days=79 - index), *row)
-            for index, row in enumerate(bars)
-        ],
+        [(code, AS_OF - timedelta(days=79 - index), *row) for index, row in enumerate(bars)],
     )
 
 
@@ -74,8 +68,12 @@ def connection(tmp_path: Path) -> duckdb.DuckDBPyConnection:
         [AS_OF],
     )
     db.execute(
-        "INSERT INTO pledge (code, date, controlling_pledge_ratio) "
-        "VALUES ('000003', ?, 0.82)",
+        "INSERT INTO pledge (code, date, controlling_pledge_ratio) VALUES ('000003', ?, 0.82)",
+        [AS_OF],
+    )
+    db.execute(
+        "INSERT INTO announcements (ann_id, code, ann_date, title) "
+        "VALUES ('a3', '000003', ?, '公司收到立案告知书')",
         [AS_OF],
     )
     try:
@@ -114,7 +112,7 @@ def test_daily_detects_four_trigger_types_and_dedupes(
     assert any("重大公告" in reason for reason in by_code["000001"].reasons)
     assert any("单日涨跌幅" in reason for reason in by_code["000001"].reasons)
     assert any("动量破位" in reason for reason in by_code["000002"].reasons)
-    assert any("新触发 Veto：pledge_ratio" in reason for reason in by_code["000003"].reasons)
+    assert any("新触发 Veto：investigation" in reason for reason in by_code["000003"].reasons)
 
     assert set(result.reviews) == {"000001", "000002", "000003"}
     card = build_daily_card(
@@ -129,16 +127,14 @@ def test_daily_detects_four_trigger_types_and_dedupes(
 
     state = (tmp_path / "daily.json").read_text(encoding="utf-8")
     assert "000002" in state
-    assert "000003:pledge_ratio" in state
+    assert "000003:investigation" in state
 
     second = _run(connection, tmp_path)
     assert second.triggers == ()
     assert second.reviews == {}
 
 
-def test_ignored_code_is_suppressed(
-    connection: duckdb.DuckDBPyConnection, tmp_path: Path
-) -> None:
+def test_ignored_code_is_suppressed(connection: duckdb.DuckDBPyConnection, tmp_path: Path) -> None:
     ignore_code("000001", path=tmp_path / "ignored.json", as_of=AS_OF)
 
     result = _run(connection, tmp_path)
@@ -170,9 +166,43 @@ def test_core_pool_merges_watchlist_and_weekly_scores(
         lambda max_entries: SimpleNamespace(codes=("000009",)),
     )
 
-    assert core_pool(
-        connection, load_settings(), as_of=AS_OF
-    ) == ("000009", "000001")
-    assert core_pool(connection, load_settings(), codes=["000002", "000002"]) == (
-        "000002",
+    assert core_pool(connection, load_settings(), as_of=AS_OF) == ("000009", "000001")
+    assert core_pool(connection, load_settings(), codes=["000002", "000002"]) == ("000002",)
+
+
+def test_daily_retries_persisted_alert_after_delivery_failure(connection, tmp_path):
+    from stock_auditor.feishu.base import FeishuError
+
+    class Channel:
+        name = "webhook"
+        configured = True
+        fail = True
+        sent = []
+
+        def send_card(self, card):
+            if self.fail:
+                raise FeishuError("unavailable")
+            self.sent.append(card)
+
+    channel = Channel()
+    kwargs = dict(
+        as_of=AS_OF,
+        codes=["000001"],
+        push=True,
+        channel=channel,
+        state_file=tmp_path / "retry.json",
+        ignored_path=tmp_path / "ignore.json",
+        earnings_state_file=tmp_path / "earnings.json",
+        use_lock=False,
     )
+    first = run_daily(connection, load_settings(), now=NOW, **kwargs)
+    assert first.pushed_count == 0
+    assert connection.execute("SELECT status FROM alert_outbox").fetchone() == ("pending",)
+    assert connection.execute(
+        "SELECT status FROM run_log WHERE run_id = ?", [first.run_id]
+    ).fetchone() == ("partial",)
+    channel.fail = False
+    second = run_daily(connection, load_settings(), now=NOW + timedelta(seconds=1), **kwargs)
+    assert second.triggers == ()
+    assert second.pushed_count == 1
+    assert len(channel.sent) == 1

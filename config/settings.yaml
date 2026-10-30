@@ -44,6 +44,7 @@ fundamental:
   min_analyst_count: 3           # 少于 3 家机构覆盖视为一致预期缺失
   revenue_cagr_years: 3          # 营收 CAGR 年数
   history_min_valid_days: 600    # 历史分位最少有效交易日
+  use_consensus: false           # 默认仅使用已披露历史财务数据
   consensus_source: akshare      # 过渡期一致预期来源
   percentile_method: average_rank
 

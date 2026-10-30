@@ -170,7 +170,7 @@ def _has_breakdown(
 ) -> bool:
     total = len(closes)
     for day in range(max(0, total - lookback_days), total):
-        if day + confirm_days >= total:
+        if day + confirm_days > total:
             continue
         ma_value = ma_long[day]
         volume_average = volume_mid[day]
@@ -182,7 +182,7 @@ def _has_breakdown(
         if all(
             ma_long[day + offset] is not None
             and closes[day + offset] < ma_long[day + offset]
-            for offset in range(1, confirm_days + 1)
+            for offset in range(1, total - day)
         ):
             return True
     return False

@@ -85,6 +85,8 @@ def collect_index(client: DataClient, settings: Settings) -> list[tuple[Any, ...
         for key, row in _benchmark_rows(client, benchmark, cutoff).items():
             collected[(benchmark, key)] = row
     except Exception as exc:  # noqa: BLE001 - 指数是辅助数据
+        if hasattr(client, "record_failure"):
+            client.record_failure("index", benchmark, exc)
         log.error("ingest.index.benchmark_failed", code=benchmark, error=str(exc))
 
     for sector_code in settings.tracking.sector_benchmarks.values():
@@ -93,6 +95,8 @@ def collect_index(client: DataClient, settings: Settings) -> list[tuple[Any, ...
             for key, row in _sector_rows(client, code, cutoff).items():
                 collected[(code, key)] = row
         except Exception as exc:  # noqa: BLE001 - 单个行业指数失败不阻塞
+            if hasattr(client, "record_failure"):
+                client.record_failure("index", code, exc)
             log.warning("ingest.index.sector_failed", code=code, error=str(exc))
 
     rows = [collected[key] for key in sorted(collected)]

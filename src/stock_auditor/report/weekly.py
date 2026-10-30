@@ -32,7 +32,7 @@ VALUES (?, ?, ?, ?, ?)
 _ROW_SQL = """
 SELECT f.code, COALESCE(u.name, ''), q.fundamental, q.momentum,
        f.raw_total, f.final_total, f.stars, f.is_yellow, f.is_veto,
-       t.tier, t.score, t.status, t.payload, d.payload, q.data_flag
+       t.tier, t.score, t.status, t.payload, d.payload, q.data_flag, q.is_imputed
 FROM final_scores f
 LEFT JOIN stock_universe u ON u.code = f.code
 LEFT JOIN quant_scores q ON q.run_id = f.run_id AND q.code = f.code
@@ -75,6 +75,7 @@ class WeeklyRow:
     risk_tags: tuple[dict[str, Any], ...] = ()
     evidence: tuple[dict[str, str], ...] = ()
     data_flag: str | None = None
+    peg_unavailable: bool = False
 
     @property
     def is_detail(self) -> bool:
@@ -105,6 +106,7 @@ class WeeklyRow:
             "risk_tags": list(self.risk_tags),
             "evidence": list(self.evidence),
             "data_flag": self.data_flag,
+            "peg_unavailable": self.peg_unavailable,
         }
 
 
@@ -130,7 +132,9 @@ def _load_json(value: Any, default: Any) -> Any:
         return default
 
 
-def _tier2_parts(payload: Any) -> tuple[
+def _tier2_parts(
+    payload: Any,
+) -> tuple[
     tuple[dict[str, Any], ...],
     tuple[dict[str, Any], ...],
     tuple[dict[str, Any], ...],
@@ -138,15 +142,9 @@ def _tier2_parts(payload: Any) -> tuple[
     data = _load_json(payload, {})
     if not isinstance(data, dict):
         return (), (), ()
-    reasons = tuple(
-        item for item in data.get("reasons", []) if isinstance(item, dict)
-    )
-    bear_points = tuple(
-        item for item in data.get("bear_points", []) if isinstance(item, dict)
-    )
-    risk_tags = tuple(
-        item for item in data.get("risk_tags", []) if isinstance(item, dict)
-    )
+    reasons = tuple(item for item in data.get("reasons", []) if isinstance(item, dict))
+    bear_points = tuple(item for item in data.get("bear_points", []) if isinstance(item, dict))
+    risk_tags = tuple(item for item in data.get("risk_tags", []) if isinstance(item, dict))
     return reasons, bear_points, risk_tags
 
 
@@ -200,8 +198,12 @@ def collect_weekly_rows(
             tier2_payload,
             dossier_payload,
             data_flag,
+            is_imputed,
         ) = record
         reasons, bear_points, risk_tags = _tier2_parts(tier2_payload)
+        imputed = _load_json(is_imputed, {})
+        if not isinstance(imputed, dict):
+            imputed = {}
         rows.append(
             WeeklyRow(
                 code=str(code),
@@ -226,6 +228,9 @@ def collect_weekly_rows(
                 risk_tags=risk_tags,
                 evidence=_evidence(dossier_payload, reasons, bear_points),
                 data_flag=data_flag,
+                peg_unavailable=bool(
+                    imputed.get("peg_unavailable") or imputed.get("consensus_cagr")
+                ),
             )
         )
     return tuple(rows)
@@ -241,9 +246,7 @@ def _stars(stars: int | None) -> str:
 
 
 def _risk_text(risk_tags: tuple[dict[str, Any], ...]) -> str:
-    return "、".join(
-        f"{tag.get('tag', '')}({tag.get('severity', '')})" for tag in risk_tags
-    ) or "-"
+    return "、".join(f"{tag.get('tag', '')}({tag.get('severity', '')})" for tag in risk_tags) or "-"
 
 
 def _reason_text(row: WeeklyRow) -> str:
@@ -270,14 +273,16 @@ def _main_markdown(top: list[WeeklyRow], veto_count: int) -> str:
     lines: list[str] = []
     for index, row in enumerate(top[:3], start=1):
         lines.append(
-            f"{index}. **{row.name}（{row.code}）** "
-            f"{_stars(row.stars)} {_score_text(row)}"
+            f"{index}. **{row.name}（{row.code}）** {_stars(row.stars)} {_score_text(row)}"
         )
         lines.append(f"   理由：{_cell(_reason_text(row), limit=120)}")
         lines.append(f"   风险：{_risk_text(row.risk_tags)}")
+        if row.peg_unavailable:
+            lines.append("   一致预期未使用，PEG 暂未评分（按 0 分计入）")
     if not lines:
         lines.append("本期没有进入推送区的股票。")
     lines.append(f"\n本周新增 Veto：{veto_count} 只")
+    lines.append("质押数据不全：控股股东质押硬 Veto 已停用。")
     return "\n".join(lines)
 
 
@@ -290,6 +295,8 @@ def render_detail_markdown(row: WeeklyRow) -> str:
         "",
         "**打分理由**",
     ]
+    if row.peg_unavailable:
+        lines.insert(2, "一致预期未使用，PEG 暂未评分（按 0 分计入）")
     for index, reason in enumerate(row.reasons[:3], start=1):
         lines.append(f"{index}. {reason.get('text', '')}")
     lines.append("")
@@ -302,9 +309,7 @@ def render_detail_markdown(row: WeeklyRow) -> str:
         lines.append("")
         lines.append("**证据链**")
         for item in row.evidence:
-            lines.append(
-                f"- {item['fact_id']}：{item['statement']}（原文：{item['quote']}）"
-            )
+            lines.append(f"- {item['fact_id']}：{item['statement']}（原文：{item['quote']}）")
     return "\n".join(lines)
 
 
@@ -319,6 +324,13 @@ def render_weekly_markdown(payload: dict[str, Any]) -> str:
         f"评分 {counts['scored']} 只；LLM 池 {counts['pool']} 只",
         f"- LLM token：{counts['llm_tokens']}；费用：{counts['llm_cost']:.4f} 元",
     ]
+    lines.append("- 风控提示：质押数据不全，控股股东质押硬 Veto 已停用。")
+    missing_peg = [row for row in payload["top"] if row.get("peg_unavailable")]
+    if missing_peg:
+        lines.append(
+            "- 一致预期未使用或缺失，PEG 暂未评分（按 0 分计入）："
+            + "、".join(row["code"] for row in missing_peg)
+        )
     if payload.get("audit_skipped"):
         skip_reason = payload.get("audit_skip_reason") or "LLM 未配置"
         lines.append(f"- 模型审计：未执行（{skip_reason}）")
@@ -326,13 +338,15 @@ def render_weekly_markdown(payload: dict[str, Any]) -> str:
         lines.append("- 排序：按量化总分（模型审计未执行）")
     if payload.get("chart_path"):
         lines.append(f"- 图表：{payload['chart_path']}")
-    lines.extend([
-        "",
-        "## 本周 Top 20",
-        "",
-        "| 排名 | 代码 | 名称 | 星级 | 总分 | 量化 | 前景 | 档位 | 风险标签 | 一句话理由 |",
-        "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
-    ])
+    lines.extend(
+        [
+            "",
+            "## 本周 Top 20",
+            "",
+            "| 排名 | 代码 | 名称 | 星级 | 总分 | 量化 | 前景 | 档位 | 风险标签 | 一句话理由 |",
+            "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
+        ]
+    )
     for index, row in enumerate(payload["top"], start=1):
         lines.append(
             f"| {index} | {row['code']} | {row['name']} | {_stars(row['stars'])} | "
@@ -415,9 +429,7 @@ def _push(
         except FeishuError as exc:
             log.warning("weekly.chart_upload_failed", error=str(exc))
     show_button = channel.name == "app"
-    channel.send_card(
-        build_main_card(payload, show_button=show_button, image_key=image_key)
-    )
+    channel.send_card(build_main_card(payload, show_button=show_button, image_key=image_key))
     for row in rows:
         if row.is_detail:
             detail = row.to_dict()
@@ -465,13 +477,10 @@ def build_weekly_report(
     _, started_at, finished_at, status, llm_tokens, llm_cost, step_status = log_row
     audit_skip_reason = _audit_skip_reason(step_status)
     if as_of is None:
-        as_of = (
-            started_at.date() if isinstance(started_at, datetime) else date.today()
-        )
+        as_of = started_at.date() if isinstance(started_at, datetime) else date.today()
 
     scored = connection.execute(
-        "SELECT count(*), sum(CASE WHEN passed THEN 1 ELSE 0 END) "
-        "FROM filter_log WHERE run_id = ?",
+        "SELECT count(*), sum(CASE WHEN passed THEN 1 ELSE 0 END) FROM filter_log WHERE run_id = ?",
         [run_id],
     ).fetchone()
     pool = connection.execute(
@@ -483,36 +492,30 @@ def build_weekly_report(
         row.final_total is not None for row in rows
     )
     if fallback_to_quant:
-        ranked = [
-            row
-            for row in rows
-            if not row.is_veto and _display_score(row) is not None
-        ]
+        ranked = [row for row in rows if not row.is_veto and _display_score(row) is not None]
         ranked.sort(key=lambda row: (-(_display_score(row) or 0.0), row.code))
         ranked_by = "quant"
     else:
-        ranked = [
-            row
-            for row in rows
-            if row.final_total is not None and not row.is_veto
-        ]
+        ranked = [row for row in rows if row.final_total is not None and not row.is_veto]
         ranked_by = "final"
     top = [row.to_dict() for row in ranked[:20]]
-    yellow = [
-        row.to_dict() for row in rows if row.is_yellow and row.final_total is not None
-    ]
+    yellow = [row.to_dict() for row in rows if row.is_yellow and row.final_total is not None]
     veto = [row.to_dict() for row in rows if row.is_veto]
-    failures = [] if audit_skip_reason else [
-        {
-            "code": str(code),
-            "name": str(name),
-            "tier1_status": tier1_status or "missing",
-            "tier2_status": tier2_status or "missing",
-        }
-        for code, name, tier1_status, tier2_status in connection.execute(
-            _FAILURE_SQL, [run_id]
-        ).fetchall()
-    ]
+    failures = (
+        []
+        if audit_skip_reason
+        else [
+            {
+                "code": str(code),
+                "name": str(name),
+                "tier1_status": tier1_status or "missing",
+                "tier2_status": tier2_status or "missing",
+            }
+            for code, name, tier1_status, tier2_status in connection.execute(
+                _FAILURE_SQL, [run_id]
+            ).fetchall()
+        ]
+    )
 
     path = paths.reports_dir() / f"{run_id}.md"
     counts = {
@@ -540,9 +543,7 @@ def build_weekly_report(
     }
     chart_path: Path | None = None
     try:
-        chart_path = render_weekly_chart(
-            payload, paths.reports_dir() / f"{run_id}.png"
-        )
+        chart_path = render_weekly_chart(payload, paths.reports_dir() / f"{run_id}.png")
     except Exception as exc:  # 图表是可选产出，渲染失败不能阻断周报
         log.warning("weekly.chart_failed", error=str(exc))
     payload["chart_path"] = str(chart_path) if chart_path is not None else None

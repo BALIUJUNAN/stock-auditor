@@ -64,8 +64,13 @@ def collect_valuation(
     for raw_code in codes:
         code = normalize_code(raw_code)
         try:
-            rows.extend(fetch_valuation_rows(client, code, cutoff))
+            collected = fetch_valuation_rows(client, code, cutoff)
+            if not collected:
+                raise ValueError("no data returned")
+            rows.extend(collected)
         except Exception as exc:  # noqa: BLE001 - 单只失败不阻塞整批
+            if hasattr(client, "record_failure"):
+                client.record_failure("valuation", code, exc)
             log.error("ingest.valuation.failed", code=code, error=str(exc))
     log.info("ingest.valuation.collected", rows=len(rows))
     return rows

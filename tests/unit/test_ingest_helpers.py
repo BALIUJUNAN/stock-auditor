@@ -93,3 +93,83 @@ def test_announcement_id_fallback_is_stable() -> None:
 def test_index_symbol() -> None:
     assert index_symbol("000300") == "sh000300"
     assert index_symbol("399006") == "sz399006"
+
+
+def test_announcement_text_backfill_retries_and_keeps_existing(monkeypatch):
+    import duckdb
+
+    from stock_auditor.db import apply_migrations
+    from stock_auditor.ingest import announcements
+
+    class Client:
+        def call(self, func, *, description):
+            return func()
+
+    calls = []
+
+    def fetch(ann_id):
+        calls.append(ann_id)
+        if len(calls) == 1:
+            raise ValueError("offline")
+        return "公告正文" * 40
+
+    monkeypatch.setattr(announcements, "fetch_pdf_text", fetch)
+    with duckdb.connect(":memory:") as db:
+        apply_migrations(db)
+        db.execute(
+            "INSERT INTO announcements (ann_id, code, ann_date) "
+            "VALUES ('AN123', '000001', DATE '2026-01-01')"
+        )
+        count, errors = announcements.backfill_announcement_text(db, Client())
+        assert count == 0 and "AN123" in errors
+        count, errors = announcements.backfill_announcement_text(db, Client())
+        assert count == 1 and not errors
+        text, digest = db.execute("SELECT text, text_hash FROM announcements").fetchone()
+        assert len(text) >= 100 and len(digest) == 64
+        announcements.store_announcements(
+            db, [("AN123", "000001", date(2026, 1, 1), "title", None, None, None, None)]
+        )
+        assert db.execute("SELECT text FROM announcements").fetchone()[0] == text
+
+
+def test_pdf_download_extracts_text(monkeypatch):
+    from stock_auditor.ingest import announcements
+
+    sentence = "Verified disclosure evidence " * 8
+    stream = f"BT /F1 10 Tf 20 700 Td ({sentence}) Tj ET".encode()
+    objects = [
+        b"<< /Type /Catalog /Pages 2 0 R >>",
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] "
+        b"/Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>",
+        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+        b"<< /Length " + str(len(stream)).encode() + b" >>\nstream\n" + stream + b"\nendstream",
+    ]
+    data = bytearray(b"%PDF-1.4\n")
+    offsets = [0]
+    for i, obj in enumerate(objects, 1):
+        offsets.append(len(data))
+        data.extend(f"{i} 0 obj\n".encode() + obj + b"\nendobj\n")
+    xref = len(data)
+    data.extend(f"xref\n0 {len(offsets)}\n0000000000 65535 f \n".encode())
+    for offset in offsets[1:]:
+        data.extend(f"{offset:010d} 00000 n \n".encode())
+    data.extend(
+        f"trailer\n<< /Size {len(offsets)} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF".encode()
+    )
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+        def raise_for_status(self):
+            pass
+
+        def iter_content(self, size):
+            yield bytes(data)
+
+    monkeypatch.setattr(announcements.requests, "get", lambda *args, **kwargs: Response())
+    assert "Verified disclosure evidence" in announcements.fetch_pdf_text("AN123")

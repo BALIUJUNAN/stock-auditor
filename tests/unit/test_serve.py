@@ -55,12 +55,8 @@ def test_parse_schedule() -> None:
 def test_latest_occurrence_handles_weekends() -> None:
     daily = parse_schedule("mon-fri 16:30")
     assert latest_occurrence(daily, NOW) == DAILY_SLOT
-    assert latest_occurrence(daily, datetime(2026, 10, 31, 10, 0)) == datetime(
-        2026, 10, 30, 16, 30
-    )
-    assert latest_occurrence(daily, datetime(2026, 10, 31, 3, 0)) == datetime(
-        2026, 10, 30, 16, 30
-    )
+    assert latest_occurrence(daily, datetime(2026, 10, 31, 10, 0)) == datetime(2026, 10, 30, 16, 30)
+    assert latest_occurrence(daily, datetime(2026, 10, 31, 3, 0)) == datetime(2026, 10, 30, 16, 30)
 
     weekly = parse_schedule("sun 20:00")
     assert latest_occurrence(weekly, NOW) == WEEKLY_SLOT
@@ -94,22 +90,28 @@ def test_catch_up_only_within_grace_and_without_success(
         [DAILY_SLOT, DAILY_SLOT],
     )
     calls.clear()
-    assert catch_up_pipelines(
-        connection,
-        load_settings(),
-        now=NOW,
-        runners={"weekly": weekly, "daily": daily},
-    ) == ()
+    assert (
+        catch_up_pipelines(
+            connection,
+            load_settings(),
+            now=NOW,
+            runners={"weekly": weekly, "daily": daily},
+        )
+        == ()
+    )
     assert calls == []
 
     # 超过 12 小时宽限窗口，即使没跑过也不补跑。
     late = datetime(2026, 10, 30, 5, 0)
-    assert catch_up_pipelines(
-        connection,
-        load_settings(),
-        now=late,
-        runners={"weekly": weekly, "daily": daily},
-    ) == ()
+    assert (
+        catch_up_pipelines(
+            connection,
+            load_settings(),
+            now=late,
+            runners={"weekly": weekly, "daily": daily},
+        )
+        == ()
+    )
 
 
 def test_catch_up_ignores_runner_failure(connection: duckdb.DuckDBPyConnection) -> None:
@@ -200,3 +202,23 @@ def test_start_serve_can_skip_bot_and_catch_up(tmp_path: Path) -> None:
         assert runtime.bot_thread is None
     finally:
         runtime.stop()
+
+
+def test_daily_runner_passes_configured_llm(monkeypatch, tmp_path):
+    import stock_auditor.serve as serve
+    from stock_auditor.ingest.service import IngestSummary
+
+    client = object()
+    received = []
+
+    @contextmanager
+    def factory():
+        with duckdb.connect(":memory:") as db:
+            yield db
+
+    monkeypatch.setattr(serve, "connect", factory)
+    monkeypatch.setattr(serve, "LlmClient", lambda settings: client)
+    monkeypatch.setattr(serve, "run_ingest", lambda *args: IngestSummary())
+    monkeypatch.setattr(serve, "run_daily", lambda *args, **kwargs: received.append(kwargs))
+    serve.default_runners(load_settings())["daily"]()
+    assert received == [{"client": client, "ingest_errors": {}}]

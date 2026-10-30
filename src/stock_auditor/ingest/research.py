@@ -81,6 +81,8 @@ def collect_research(
             for row in fetch_research_rows(client, settings, code, cutoff):
                 rows[(row[0], row[1], row[2])] = row
         except Exception as exc:  # noqa: BLE001 - 单只失败不阻塞整批
+            if hasattr(client, "record_failure"):
+                client.record_failure("research", code, exc)
             log.error("ingest.research.failed", code=code, error=str(exc))
     result = [rows[key] for key in sorted(rows)]
     log.info("ingest.research.collected", rows=len(result))

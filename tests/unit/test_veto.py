@@ -145,7 +145,7 @@ def test_regulatory_penalty_outside_lookback() -> None:
 def test_pledge_ratio_above_threshold() -> None:
     data = _data(pledge=(PledgeRow(date=date(2026, 9, 30), controlling_pledge_ratio=0.75),))
     events = check_hard_veto(data, _settings(), AS_OF)
-    assert [event.rule for event in events] == ["pledge_ratio"]
+    assert events == []  # Existing pledge rows have no verified controlling-holder provenance.
 
 
 def test_pledge_ratio_at_threshold_passes() -> None:

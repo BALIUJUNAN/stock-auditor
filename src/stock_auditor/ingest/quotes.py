@@ -107,8 +107,13 @@ def collect_quotes(
     for raw_code in codes:
         code = normalize_code(raw_code)
         try:
-            rows.extend(fetch_quote_rows(client, code, start, end))
+            collected = fetch_quote_rows(client, code, start, end)
+            if not collected:
+                raise ValueError("no data returned")
+            rows.extend(collected)
         except Exception as exc:  # noqa: BLE001 - 单只失败不阻塞整批
+            if hasattr(client, "record_failure"):
+                client.record_failure("quotes", code, exc)
             log.error("ingest.quotes.failed", code=code, error=str(exc))
     log.info("ingest.quotes.collected", rows=len(rows))
     return rows

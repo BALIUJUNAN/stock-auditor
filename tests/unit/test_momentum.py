@@ -115,3 +115,16 @@ def test_breakdown_penalty_is_applied_and_clamped() -> None:
     assert result.penalty == 10
     assert result.score == 0
     assert "破位" in result.tags
+
+
+@pytest.mark.parametrize(
+    ("closes", "expected"),
+    [([9.0, 9.0, 9.0], True), ([9.0, 9.0], False),
+     ([9.0, 9.0, 10.0], False), ([9.0, 9.0, 9.0, 10.0], False)],
+)
+def test_breakdown_confirmation_includes_first_day_and_stays_below(closes, expected):
+    from stock_auditor.scoring.momentum import _has_breakdown
+
+    n = len(closes)
+    assert _has_breakdown(closes, [20.0] + [1.0] * (n - 1), [10.0] * n,
+                          [10.0] * n, 10, 1.5, 3) is expected
