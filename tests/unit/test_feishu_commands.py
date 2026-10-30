@@ -153,6 +153,14 @@ def test_non_command_and_unknown_command(
 def test_query_returns_card_and_enforces_rate_limit(
     connection: duckdb.DuckDBPyConnection, tmp_path: Path
 ) -> None:
+    connection.execute(
+        "UPDATE run_log SET step_status = ? WHERE run_id = ?",
+        [json.dumps({"S7": "done", "S8": "done"}), RUN_ID],
+    )
+    connection.execute(
+        "INSERT INTO weekly_reports (run_id, report_json, markdown) VALUES (?, '{}', 'report')",
+        [RUN_ID],
+    )
     now = [NOW]
     service = _service(connection, tmp_path, clock=lambda: now[0])
 
