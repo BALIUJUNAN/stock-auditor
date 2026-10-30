@@ -207,3 +207,67 @@ def test_backfill_limits_work_to_selected_current_candidates(monkeypatch):
             db, Client(), codes=["000001"], as_of=date(2026, 10, 29), lookback_days=90
         )
         assert (count, failures, seen) == (1, {}, ["AN1"])
+
+
+def test_candidate_backfill_reports_complete_failed_and_deferred(monkeypatch):
+    import duckdb
+
+    from stock_auditor.db import apply_migrations
+    from stock_auditor.ingest import announcements
+
+    class Client:
+        def call(self, func, *, description):
+            return func()
+
+    def fetch(ann_id):
+        if ann_id == "AN3":
+            raise ValueError("unavailable")
+        return "text" * 40
+
+    monkeypatch.setattr(announcements, "fetch_pdf_text", fetch)
+    with duckdb.connect(":memory:") as db:
+        apply_migrations(db)
+        for i in range(1, 8):
+            db.execute(
+                "INSERT INTO announcements (ann_id,code,ann_date,text) "
+                "VALUES (?, '000001', DATE '2026-10-01', ?)",
+                [f"AN{i}", "x" * 100 if i in (1, 2) else None],
+            )
+        result = announcements.backfill_announcement_text(
+            db, Client(), codes=["000001"], as_of=date(2026, 10, 29), lookback_days=90, limit=3
+        )
+        assert (result.required, result.completed, len(result.failed), result.deferred) == (
+            7,
+            4,
+            1,
+            2,
+        )
+        assert set(result.failed) == {"AN3"}
+
+
+def test_candidate_backfill_reports_over_100_as_deferred(monkeypatch):
+    import duckdb
+
+    from stock_auditor.db import apply_migrations
+    from stock_auditor.ingest import announcements
+
+    class Client:
+        def call(self, func, *, description):
+            return func()
+
+    monkeypatch.setattr(announcements, "fetch_pdf_text", lambda ann_id: "text" * 40)
+    with duckdb.connect(":memory:") as db:
+        apply_migrations(db)
+        db.execute(
+            "INSERT INTO announcements (ann_id,code,ann_date) "
+            "SELECT 'AN' || i::VARCHAR, '000001', DATE '2026-10-01' FROM range(105) AS t(i)"
+        )
+        result = announcements.backfill_announcement_text(
+            db, Client(), codes=["000001"], as_of=date(2026, 10, 29), limit=100
+        )
+        assert (result.required, result.completed, len(result.failed), result.deferred) == (
+            105,
+            100,
+            0,
+            5,
+        )

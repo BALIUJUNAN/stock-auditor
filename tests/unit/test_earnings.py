@@ -176,3 +176,19 @@ def test_recompute_due_and_state_dedupe(
     )
     assert second.due == ()
     assert second.recalculated == ()
+
+
+def test_earnings_refresh_does_not_backfill_global_announcements(monkeypatch):
+    import stock_auditor.pipeline.earnings as earnings
+    from stock_auditor.ingest.service import IngestSummary
+
+    captured = {}
+
+    def ingest(*args, **kwargs):
+        captured.update(kwargs)
+        return IngestSummary(errors={"quotes": "failed"})
+
+    monkeypatch.setattr(earnings, "run_ingest", ingest)
+    with duckdb.connect(":memory:") as db, pytest.raises(RuntimeError):
+        earnings.recalculate_stock(db, load_settings(), "000001", as_of=AS_OF, run_id="test")
+    assert captured == {"codes": ["000001"], "backfill_text": False}

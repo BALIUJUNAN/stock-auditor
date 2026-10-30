@@ -359,6 +359,7 @@ def run_daily(
     earnings_state_file: Path | None = None,
     ingest: Callable[..., Any] | None = None,
     ingest_errors: Mapping[str, str] | None = None,
+    ingest_warnings: Mapping[str, str] | None = None,
     use_lock: bool = True,
 ) -> DailyResult:
     """执行每日流水线：核心池异动告警 + 财报提醒与 T+1 重算。"""
@@ -369,6 +370,8 @@ def run_daily(
         context = RunContext.start(PIPELINE, now=moment)
         if ingest_errors:
             context.fail_step("D0", str(dict(ingest_errors)))
+        if ingest_warnings:
+            context.warn_step("D0_data", str(dict(ingest_warnings)))
         context.save(connection)
         log.info("pipeline.daily.start", run_id=context.run_id)
 

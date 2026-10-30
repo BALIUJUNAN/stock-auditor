@@ -247,7 +247,7 @@ def recalculate_stock(
     if ingest is not None:
         summary = ingest(connection, settings, [code])
     else:
-        summary = run_ingest(connection, settings, codes=[code])
+        summary = run_ingest(connection, settings, codes=[code], backfill_text=False)
     if getattr(summary, "errors", None):
         raise RuntimeError(f"财报重算数据刷新失败: {summary.errors}")
 

@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import io
 import re
+from dataclasses import dataclass
 from datetime import date, timedelta
 from typing import Any
 
@@ -151,6 +152,20 @@ def fetch_pdf_text(ann_id: str) -> str:
     return text[:200000]
 
 
+@dataclass(frozen=True)
+class AnnouncementBackfillResult:
+    required: int
+    completed: int
+    failed: dict[str, str]
+    deferred: int
+    newly_completed: int
+
+    def __iter__(self):
+        # Preserve unpacking for existing callers.
+        yield self.newly_completed
+        yield self.failed
+
+
 def backfill_announcement_text(
     connection: duckdb.DuckDBPyConnection,
     client: DataClient,
@@ -159,14 +174,14 @@ def backfill_announcement_text(
     codes: list[str] | None = None,
     as_of: date | None = None,
     lookback_days: int | None = None,
-) -> tuple[int, dict[str, str]]:
+) -> AnnouncementBackfillResult:
     connection.execute(
         "CREATE TABLE IF NOT EXISTS announcement_text_attempts "
         "(ann_id VARCHAR PRIMARY KEY, attempts INTEGER NOT NULL, last_error VARCHAR)"
     )
     if codes is not None and not codes:
-        return 0, {}
-    filters = ["(a.text IS NULL OR length(trim(a.text)) < 100)"]
+        return AnnouncementBackfillResult(0, 0, {}, 0, 0)
+    filters = ["1=1"]
     params: list[Any] = []
     if codes is not None:
         filters.append("a.code IN (" + ", ".join("?" for _ in codes) + ")")
@@ -177,6 +192,14 @@ def backfill_announcement_text(
         if lookback_days is not None:
             filters.append("a.ann_date >= ?")
             params.append(as_of - timedelta(days=lookback_days))
+    totals = connection.execute(
+        "SELECT count(*), count(*) FILTER "
+        "(WHERE a.text IS NOT NULL AND length(trim(a.text)) >= 100) "
+        "FROM announcements a WHERE " + " AND ".join(filters),
+        params,
+    ).fetchone()
+    required, previously_completed = (int(totals[0]), int(totals[1]))
+    filters.append("(a.text IS NULL OR length(trim(a.text)) < 100)")
     rows = connection.execute(
         "SELECT a.ann_id FROM announcements a "
         "LEFT JOIN announcement_text_attempts t ON a.ann_id = t.ann_id "
@@ -207,4 +230,10 @@ def backfill_announcement_text(
                 [ann_id, str(exc)],
             )
             log.warning("ingest.announcement_text.failed", ann_id=ann_id, error=str(exc))
-    return success, failures
+    return AnnouncementBackfillResult(
+        required=required,
+        completed=previously_completed + success,
+        failed=failures,
+        deferred=required - previously_completed - len(rows),
+        newly_completed=success,
+    )

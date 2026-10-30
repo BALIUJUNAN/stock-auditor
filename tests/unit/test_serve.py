@@ -218,7 +218,32 @@ def test_daily_runner_passes_configured_llm(monkeypatch, tmp_path):
 
     monkeypatch.setattr(serve, "connect", factory)
     monkeypatch.setattr(serve, "LlmClient", lambda settings: client)
-    monkeypatch.setattr(serve, "run_ingest", lambda *args: IngestSummary())
+    monkeypatch.setattr(serve, "run_ingest", lambda *args, **kwargs: IngestSummary())
     monkeypatch.setattr(serve, "run_daily", lambda *args, **kwargs: received.append(kwargs))
     serve.default_runners(load_settings())["daily"]()
-    assert received == [{"client": client, "ingest_errors": {}}]
+    assert received == [{"client": client, "ingest_errors": {}, "ingest_warnings": {}}]
+
+
+def test_daily_runner_keeps_warnings_separate_and_skips_pdf(monkeypatch, tmp_path):
+    import stock_auditor.serve as serve
+    from stock_auditor.ingest.service import IngestSummary
+
+    calls = {}
+
+    @contextmanager
+    def factory():
+        with duckdb.connect(":memory:") as db:
+            yield db
+
+    def ingest(*args, **kwargs):
+        calls["ingest"] = kwargs
+        return IngestSummary(warnings={"announcement_text": "missing"})
+
+    monkeypatch.setattr(serve, "connect", factory)
+    monkeypatch.setattr(serve, "LlmClient", lambda settings: object())
+    monkeypatch.setattr(serve, "run_ingest", ingest)
+    monkeypatch.setattr(serve, "run_daily", lambda *args, **kwargs: calls.update(daily=kwargs))
+    serve.default_runners(load_settings())["daily"]()
+    assert calls["ingest"] == {"backfill_text": False}
+    assert calls["daily"]["ingest_errors"] == {}
+    assert calls["daily"]["ingest_warnings"]["announcement_text"] == "missing"

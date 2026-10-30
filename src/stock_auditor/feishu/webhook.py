@@ -49,9 +49,16 @@ class WebhookChannel(FeishuChannel):
             timestamp = str(int(time.time()))
             payload["timestamp"] = timestamp
             payload["sign"] = webhook_signature(timestamp, self._secret)
-        response = httpx.post(self._url, json=payload, timeout=30)
-        response.raise_for_status()
-        body = response.json()
+        try:
+            response = httpx.post(self._url, json=payload, timeout=30)
+            response.raise_for_status()
+            body = response.json()
+        except httpx.HTTPError as exc:
+            raise FeishuError(f"飞书 Webhook 网络或 HTTP 错误: {type(exc).__name__}") from exc
+        except ValueError as exc:
+            raise FeishuError("飞书 Webhook 返回无效 JSON") from exc
+        if not isinstance(body, dict):
+            raise FeishuError("飞书 Webhook 返回无效响应")
         if body.get("code") != 0:
             raise FeishuError(
                 f"飞书 Webhook 返回错误 code={body.get('code')} msg={body.get('msg')}"

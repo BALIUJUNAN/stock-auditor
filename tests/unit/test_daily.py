@@ -261,3 +261,49 @@ def test_latest_core_pool_accepts_complete_legacy_announcement_partial(connectio
         [json.dumps({"S1": "done", "S2": "done"}), recent],
     )
     assert latest_run_id(connection, "weekly", as_of=AS_OF) == old
+
+
+def test_ingest_warning_does_not_mark_daily_partial(connection, tmp_path):
+    result = run_daily(
+        connection,
+        load_settings(),
+        as_of=AS_OF,
+        codes=["000001"],
+        push=False,
+        now=NOW,
+        state_file=tmp_path / "state.json",
+        ignored_path=tmp_path / "ignored.json",
+        earnings_state_file=tmp_path / "earnings.json",
+        use_lock=False,
+        ingest_warnings={"announcement_text": "missing"},
+    )
+    status, steps = connection.execute(
+        "SELECT status, step_status FROM run_log WHERE run_id=?", [result.run_id]
+    ).fetchone()
+    assert status == "success"
+    assert "warning:" in steps
+    from stock_auditor.serve import _has_successful_run_since
+
+    assert _has_successful_run_since(connection, "daily", NOW - timedelta(minutes=1))
+
+
+def test_real_ingest_error_marks_daily_partial(connection, tmp_path):
+    result = run_daily(
+        connection,
+        load_settings(),
+        as_of=AS_OF,
+        codes=["000001"],
+        push=False,
+        now=NOW,
+        state_file=tmp_path / "state.json",
+        ignored_path=tmp_path / "ignored.json",
+        earnings_state_file=tmp_path / "earnings.json",
+        use_lock=False,
+        ingest_errors={"quotes": "failed"},
+    )
+    assert (
+        connection.execute("SELECT status FROM run_log WHERE run_id=?", [result.run_id]).fetchone()[
+            0
+        ]
+        == "partial"
+    )

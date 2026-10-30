@@ -7,6 +7,7 @@ import json
 from typing import Any
 
 import duckdb
+import httpx
 
 from stock_auditor.feishu.base import FeishuChannel, FeishuError
 
@@ -41,10 +42,11 @@ def deliver(connection: duckdb.DuckDBPyConnection, channel: FeishuChannel | None
     for identifier, payload in rows:
         try:
             channel.send_card(json.loads(payload))
-        except FeishuError as exc:
+        except (FeishuError, httpx.HTTPError, OSError) as exc:
+            error = str(exc) if isinstance(exc, FeishuError) else type(exc).__name__
             connection.execute(
                 "UPDATE alert_outbox SET attempts = attempts + 1, error = ? WHERE id = ?",
-                [str(exc), identifier],
+                [error, identifier],
             )
         else:
             connection.execute(

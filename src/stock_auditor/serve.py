@@ -182,7 +182,7 @@ def default_runners(settings: Settings) -> dict[str, Runner]:
     def daily() -> None:
         with connect() as connection:
             apply_migrations(connection)
-            summary = run_ingest(connection, settings)
+            summary = run_ingest(connection, settings, backfill_text=False)
             if summary.errors:
                 log.warning("serve.daily_ingest_errors", errors=summary.errors)
             try:
@@ -190,10 +190,13 @@ def default_runners(settings: Settings) -> dict[str, Runner]:
             except LlmNotConfiguredError as exc:
                 log.warning("serve.daily_llm_skipped", reason=str(exc))
                 client = None
-            data_errors = dict(summary.errors)
-            if summary.warnings.get("announcement_text"):
-                data_errors["announcement_text"] = summary.warnings["announcement_text"]
-            run_daily(connection, settings, client=client, ingest_errors=data_errors)
+            run_daily(
+                connection,
+                settings,
+                client=client,
+                ingest_errors=summary.errors,
+                ingest_warnings=summary.warnings,
+            )
 
     return {_WEEKLY: weekly, _DAILY: daily}
 

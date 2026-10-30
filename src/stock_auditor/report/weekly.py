@@ -331,6 +331,8 @@ def render_weekly_markdown(payload: dict[str, Any]) -> str:
             "- 一致预期未使用或缺失，PEG 暂未评分（按 0 分计入）："
             + "、".join(row["code"] for row in missing_peg)
         )
+    if payload.get("material_counts"):
+        lines.append(f"- 候选公告正文统计：{payload['material_counts']}")
     for warning in payload.get("material_warnings", []):
         lines.append(f"- 公告正文提示：{warning}")
     if payload.get("audit_skipped"):
@@ -504,6 +506,11 @@ def build_weekly_report(
         if isinstance(step_data, dict)
         else []
     )
+    material_counts = str(step_data.get("S5_materials", "")) if isinstance(step_data, dict) else ""
+    if material_counts.startswith(("done: ", "warning: ")):
+        material_counts = material_counts.split(": ", 1)[1]
+    if not material_counts.startswith("required="):
+        material_counts = ""
     if as_of is None:
         as_of = started_at.date() if isinstance(started_at, datetime) else date.today()
 
@@ -566,6 +573,7 @@ def build_weekly_report(
         "audit_skip_reason": audit_skip_reason,
         "ranked_by": ranked_by,
         "material_warnings": material_warnings,
+        "material_counts": material_counts,
         "main_markdown": _main_markdown(ranked, len(veto))
         + ("\n公告正文提示：" + "；".join(material_warnings) if material_warnings else ""),
         "footer": f"完整周报：{path}",

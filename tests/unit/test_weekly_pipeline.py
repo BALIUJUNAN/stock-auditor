@@ -218,9 +218,11 @@ def test_full_pipeline_runs_s1_to_s8(tmp_path: Path, monkeypatch: pytest.MonkeyP
             [result.run_id],
         ).fetchone()
         assert status == "success"
-        assert json.loads(step_status) == {
-            step: "done" for step in ("S1", "S2", "S3", "S4", "S5", "S6", "S7", "S8")
-        }
+        steps = json.loads(step_status)
+        assert all(
+            steps[step] == "done" for step in ("S1", "S2", "S3", "S4", "S5", "S6", "S7", "S8")
+        )
+        assert steps["S5_materials"].startswith("done:")
         assert tokens == 60
 
         assert result.report_path is not None
@@ -526,6 +528,7 @@ def test_refresh_loads_universe_after_ingest(tmp_path, monkeypatch):
 
 def test_missing_announcement_text_does_not_invalidate_weekly_results(tmp_path, monkeypatch):
     import stock_auditor.pipeline.weekly as weekly
+    from stock_auditor.ingest.announcements import AnnouncementBackfillResult
     from stock_auditor.ingest.service import IngestSummary
     from stock_auditor.pipeline.single import latest_run_id
 
@@ -539,7 +542,7 @@ def test_missing_announcement_text_does_not_invalidate_weekly_results(tmp_path, 
 
     def backfill(connection, client, **kwargs):
         captured.extend(kwargs["codes"])
-        return 0, {}
+        return AnnouncementBackfillResult(120, 80, {"AN1": "unavailable"}, 39, 0)
 
     monkeypatch.setattr(weekly, "backfill_announcement_text", backfill)
     with _database(tmp_path) as connection:
@@ -557,10 +560,16 @@ def test_missing_announcement_text_does_not_invalidate_weekly_results(tmp_path, 
             "SELECT status,step_status FROM run_log WHERE run_id=?", [result.run_id]
         ).fetchone()
         assert status == "success"
-        assert json.loads(raw)["S1_data"].startswith("warning:")
+        steps = json.loads(raw)
+        assert steps["S1_data"].startswith("warning:")
+        assert "required=120" in steps["S5_materials"]
+        assert "failed=1" in steps["S5_materials"]
+        assert "deferred=39" in steps["S5_materials"]
         assert set(captured) == {entry.code for entry in result.pool}
         assert latest_run_id(connection, "weekly", as_of=AS_OF) == result.run_id
-        assert "公告正文提示" in result.report_path.read_text(encoding="utf8")
+        markdown = result.report_path.read_text(encoding="utf8")
+        assert "公告正文提示" in markdown
+        assert "deferred=39" in markdown
 
 
 def test_single_stock_refresh_failure_blocks_weekly_before_scoring(tmp_path, monkeypatch):

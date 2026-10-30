@@ -916,17 +916,25 @@ def run_weekly(
                     )
 
             # Refresh candidate materials after selection, before assembling Tier-1.
-            if refresh and llm is not None and _reached("S5", target) and "S5" not in completed:
+            if llm is not None and _reached("S5", target) and "S5" not in completed:
                 try:
-                    _, failures = backfill_announcement_text(
+                    material_result = backfill_announcement_text(
                         connection,
                         DataClient(settings),
                         codes=[item.code for item in pool],
+                        limit=100 if refresh else 0,
                         as_of=run_date,
                         lookback_days=settings.llm.material_lookback_days,
                     )
-                    if failures:
-                        context.warn_step("S5_materials", f"{len(failures)} 公告正文获取失败")
+                    stats = (
+                        f"required={material_result.required}, "
+                        f"completed={material_result.completed}, "
+                        f"failed={len(material_result.failed)}, deferred={material_result.deferred}"
+                    )
+                    if material_result.failed or material_result.deferred:
+                        context.warn_step("S5_materials", stats)
+                    else:
+                        context.step_status["S5_materials"] = f"done: {stats}"
                     universe = load_universe(connection, as_of=run_date, codes=codes)
                 except Exception as exc:
                     context.warn_step("S5_materials", f"候选公告正文补全失败: {exc}")
