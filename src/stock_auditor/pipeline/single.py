@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
@@ -110,14 +111,37 @@ def latest_run_id(
     *,
     as_of: date | None = None,
 ) -> str | None:
-    sql = "SELECT run_id FROM run_log WHERE pipeline = ? AND status = 'success'"
+    sql = (
+        "SELECT run_id, status, step_status FROM run_log "
+        "WHERE pipeline = ? AND status IN ('success', 'partial')"
+    )
     params: list[Any] = [pipeline]
     if as_of is not None:
         sql += " AND CAST(started_at AS DATE) <= ?"
         params.append(as_of)
-    sql += " ORDER BY started_at DESC LIMIT 1"
-    row = connection.execute(sql, params).fetchone()
-    return str(row[0]) if row is not None else None
+    sql += " ORDER BY started_at DESC"
+    for run_id, status, raw_steps in connection.execute(sql, params).fetchall():
+        if pipeline != "weekly":
+            if status == "success":
+                return str(run_id)
+            continue
+        try:
+            steps = json.loads(raw_steps or "{}")
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(steps, dict):
+            continue
+        failed = [key for key, value in steps.items() if str(value).startswith("failed")]
+        usable = status == "success" and not failed
+        # Legacy partial runs with only an announcement-text warning are usable.
+        usable = usable or (status == "partial" and failed == ["S1_data"])
+        if usable and steps.get("S7") == "done" and steps.get("S8") == "done":
+            exists = connection.execute(
+                "SELECT 1 FROM weekly_reports WHERE run_id = ?", [run_id]
+            ).fetchone()
+            if exists:
+                return str(run_id)
+    return None
 
 
 def _evidence(

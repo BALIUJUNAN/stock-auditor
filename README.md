@@ -1,5 +1,7 @@
 # stock-auditor
 
+[![CI](https://github.com/BALIUJUNAN/stock-auditor/actions/workflows/ci.yml/badge.svg)](https://github.com/BALIUJUNAN/stock-auditor/actions/workflows/ci.yml)
+
 A 股基本面选股辅助与智能审计系统。以量化筛选打底，用大模型对候选股做结构化审计，
 输出带证据链的周报，并在交易日监控核心池异动与财报节点。
 
@@ -68,7 +70,7 @@ uv run sa doctor              # 环境自检；加 --send-test 会发一张飞�
 `config/local/` 下的 `feishu.example.yaml`、`watchlist.example.yaml` 是模板，复制为
 `feishu.yaml`、`watchlist.yaml` 后填写。
 
-详细说明见 [docs/CONFIG.md](docs/CONFIG.md) 与 [docs/FEISHU_SETUP.md](docs/FEISHU_SETUP.md)。
+详细说明见 [评分规则](docs/SCORING.md)、[配置说明](docs/CONFIG.md) 与 [飞书配置](docs/FEISHU_SETUP.md)。
 
 ## 常用命令
 
@@ -96,6 +98,14 @@ schedule:
   daily: "mon-fri 16:30"
   misfire_grace_hours: 12
 ```
+
+## 当前限制
+
+- 一致预期采集尚未接通，默认使用历史财务数据；PEG 未评分并按 0 分计入。
+- 控股股东及一致行动人质押明细尚不可用，相关硬 Veto 已停用并标记数据不全。
+- 公告 PDF 网络下载与真实飞书投递尚需实网验证；扫描版 PDF 不支持 OCR。
+- 采集错误会阻止周报继续；公告正文缺失作为警告，候选股正文在模型审计前优先补全。
+- 未执行模型审计时只显示量化分、不生成星级；每日核心池不会自动将纯量化分当作最终总分。
 
 ## 历史财务数据模式
 

@@ -152,18 +152,37 @@ def fetch_pdf_text(ann_id: str) -> str:
 
 
 def backfill_announcement_text(
-    connection: duckdb.DuckDBPyConnection, client: DataClient, *, limit: int = 100
+    connection: duckdb.DuckDBPyConnection,
+    client: DataClient,
+    *,
+    limit: int = 100,
+    codes: list[str] | None = None,
+    as_of: date | None = None,
+    lookback_days: int | None = None,
 ) -> tuple[int, dict[str, str]]:
     connection.execute(
         "CREATE TABLE IF NOT EXISTS announcement_text_attempts "
         "(ann_id VARCHAR PRIMARY KEY, attempts INTEGER NOT NULL, last_error VARCHAR)"
     )
+    if codes is not None and not codes:
+        return 0, {}
+    filters = ["(a.text IS NULL OR length(trim(a.text)) < 100)"]
+    params: list[Any] = []
+    if codes is not None:
+        filters.append("a.code IN (" + ", ".join("?" for _ in codes) + ")")
+        params.extend(codes)
+    if as_of is not None:
+        filters.append("a.ann_date <= ?")
+        params.append(as_of)
+        if lookback_days is not None:
+            filters.append("a.ann_date >= ?")
+            params.append(as_of - timedelta(days=lookback_days))
     rows = connection.execute(
         "SELECT a.ann_id FROM announcements a "
         "LEFT JOIN announcement_text_attempts t ON a.ann_id = t.ann_id "
-        "WHERE a.text IS NULL OR length(trim(a.text)) < 100 "
+        "WHERE " + " AND ".join(filters) + " "
         "ORDER BY COALESCE(t.attempts, 0), a.ann_date DESC, a.ann_id LIMIT ?",
-        [limit],
+        [*params, limit],
     ).fetchall()
     failures = {}
     success = 0

@@ -501,7 +501,7 @@ def test_refresh_loads_universe_after_ingest(tmp_path, monkeypatch):
 
     monkeypatch.setenv("SA_HOME", str(tmp_path))
 
-    def ingest(connection, settings, codes=None):
+    def ingest(connection, settings, codes=None, **kwargs):
         connection.execute(
             "INSERT INTO stock_universe (code, name, board, list_date) "
             "VALUES ('000001', 'Example', 'sz_main', DATE '2000-01-01')"
@@ -522,3 +522,66 @@ def test_refresh_loads_universe_after_ingest(tmp_path, monkeypatch):
         )
     assert result.universe_count == 1
     assert "000001" in result.filter_results
+
+
+def test_missing_announcement_text_does_not_invalidate_weekly_results(tmp_path, monkeypatch):
+    import stock_auditor.pipeline.weekly as weekly
+    from stock_auditor.ingest.service import IngestSummary
+    from stock_auditor.pipeline.single import latest_run_id
+
+    monkeypatch.setenv("SA_HOME", str(tmp_path))
+    monkeypatch.setattr(
+        weekly,
+        "run_ingest",
+        lambda *args, **kwargs: IngestSummary(warnings={"announcement_text": "100 missing"}),
+    )
+    captured = []
+
+    def backfill(connection, client, **kwargs):
+        captured.extend(kwargs["codes"])
+        return 0, {}
+
+    monkeypatch.setattr(weekly, "backfill_announcement_text", backfill)
+    with _database(tmp_path) as connection:
+        result = run_weekly(
+            connection,
+            load_settings(),
+            as_of=AS_OF,
+            codes=["000001", "000002"],
+            client=FakeClient(SCORES),
+            refresh=True,
+            push=False,
+            now=NOW,
+        )
+        status, raw = connection.execute(
+            "SELECT status,step_status FROM run_log WHERE run_id=?", [result.run_id]
+        ).fetchone()
+        assert status == "success"
+        assert json.loads(raw)["S1_data"].startswith("warning:")
+        assert set(captured) == {entry.code for entry in result.pool}
+        assert latest_run_id(connection, "weekly", as_of=AS_OF) == result.run_id
+        assert "公告正文提示" in result.report_path.read_text(encoding="utf8")
+
+
+def test_single_stock_refresh_failure_blocks_weekly_before_scoring(tmp_path, monkeypatch):
+    import stock_auditor.pipeline.weekly as weekly
+    from stock_auditor.ingest.service import IngestSummary
+
+    monkeypatch.setenv("SA_HOME", str(tmp_path))
+    summary = IngestSummary(
+        errors={"quotes": "000001: unavailable"}, failed_codes={"quotes": {"000001": "unavailable"}}
+    )
+    monkeypatch.setattr(weekly, "run_ingest", lambda *args, **kwargs: summary)
+    with _database(tmp_path) as connection:
+        with pytest.raises(RuntimeError, match="quotes"):
+            run_weekly(
+                connection,
+                load_settings(),
+                as_of=AS_OF,
+                refresh=True,
+                codes=["000001", "000002"],
+                push=False,
+                now=NOW,
+            )
+        assert connection.execute("SELECT status FROM run_log").fetchone()[0] == "failed"
+        assert connection.execute("SELECT count(*) FROM quant_scores").fetchone()[0] == 0

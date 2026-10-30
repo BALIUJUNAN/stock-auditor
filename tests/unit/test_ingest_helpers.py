@@ -173,3 +173,37 @@ def test_pdf_download_extracts_text(monkeypatch):
 
     monkeypatch.setattr(announcements.requests, "get", lambda *args, **kwargs: Response())
     assert "Verified disclosure evidence" in announcements.fetch_pdf_text("AN123")
+
+
+def test_backfill_limits_work_to_selected_current_candidates(monkeypatch):
+    import duckdb
+
+    from stock_auditor.db import apply_migrations
+    from stock_auditor.ingest import announcements
+
+    class Client:
+        def call(self, func, *, description):
+            return func()
+
+    seen = []
+
+    def fetch(ann_id):
+        seen.append(ann_id)
+        return "text" * 40
+
+    monkeypatch.setattr(announcements, "fetch_pdf_text", fetch)
+    with duckdb.connect(":memory:") as db:
+        apply_migrations(db)
+        db.executemany(
+            "INSERT INTO announcements (ann_id, code, ann_date) VALUES (?, ?, ?)",
+            [
+                ("AN1", "000001", date(2026, 10, 25)),
+                ("AN2", "000002", date(2026, 10, 26)),
+                ("AN3", "000001", date(2026, 11, 1)),
+                ("AN4", "000001", date(2020, 1, 1)),
+            ],
+        )
+        count, failures = announcements.backfill_announcement_text(
+            db, Client(), codes=["000001"], as_of=date(2026, 10, 29), lookback_days=90
+        )
+        assert (count, failures, seen) == (1, {}, ["AN1"])

@@ -61,6 +61,9 @@ class RunContext:
     def complete_step(self, step: str) -> None:
         self.step_status[step] = "done"
 
+    def warn_step(self, step: str, message: str) -> None:
+        self.step_status[step] = f"warning: {message}"
+
     def fail_step(self, step: str, message: str) -> None:
         self.step_status[step] = f"failed: {message}"
 

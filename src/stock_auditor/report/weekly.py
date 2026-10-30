@@ -331,6 +331,8 @@ def render_weekly_markdown(payload: dict[str, Any]) -> str:
             "- 一致预期未使用或缺失，PEG 暂未评分（按 0 分计入）："
             + "、".join(row["code"] for row in missing_peg)
         )
+    for warning in payload.get("material_warnings", []):
+        lines.append(f"- 公告正文提示：{warning}")
     if payload.get("audit_skipped"):
         skip_reason = payload.get("audit_skip_reason") or "LLM 未配置"
         lines.append(f"- 模型审计：未执行（{skip_reason}）")
@@ -415,36 +417,52 @@ def _duration(started: Any, finished: Any) -> str:
 
 
 def _push(
+    connection: duckdb.DuckDBPyConnection,
     channel: FeishuChannel,
     payload: dict[str, Any],
     rows: tuple[WeeklyRow, ...],
     *,
     chart_path: Path | None,
     duration: str,
-) -> None:
+) -> bool:
+    from stock_auditor.pipeline.outbox import deliver, enqueue
+
     image_key = None
-    if chart_path is not None and chart_path.is_file():
+    if channel.configured and chart_path is not None and chart_path.is_file():
         try:
             image_key = channel.upload_image(chart_path)
         except FeishuError as exc:
             log.warning("weekly.chart_upload_failed", error=str(exc))
-    show_button = channel.name == "app"
-    channel.send_card(build_main_card(payload, show_button=show_button, image_key=image_key))
+    cards = [
+        ("main", build_main_card(payload, show_button=channel.name == "app", image_key=image_key))
+    ]
     for row in rows:
         if row.is_detail:
             detail = row.to_dict()
             detail["markdown"] = render_detail_markdown(row)
-            channel.send_card(build_detail_card(detail))
+            cards.append((f"detail:{row.code}", build_detail_card(detail)))
     counts = payload["counts"]
-    channel.send_card(
-        build_receipt_card(
-            run_id=payload["run_id"],
-            status=payload["status"],
-            duration=duration,
-            llm_tokens=counts["llm_tokens"],
-            llm_cost=counts["llm_cost"],
+    cards.append(
+        (
+            "receipt",
+            build_receipt_card(
+                run_id=payload["run_id"],
+                status=payload["status"],
+                duration=duration,
+                llm_tokens=counts["llm_tokens"],
+                llm_cost=counts["llm_cost"],
+            ),
         )
     )
+    ids = [
+        enqueue(connection, card, key=f"weekly:{payload['run_id']}:{kind}") for kind, card in cards
+    ]
+    deliver(connection, channel)
+    placeholders = ", ".join("?" for _ in ids)
+    pending = connection.execute(
+        f"SELECT count(*) FROM alert_outbox WHERE id IN ({placeholders}) AND status <> 'sent'", ids
+    ).fetchone()[0]
+    return pending == 0
 
 
 def _audit_skip_reason(value: Any) -> str | None:
@@ -476,6 +494,16 @@ def build_weekly_report(
         raise ValueError(f"找不到运行记录：{run_id}")
     _, started_at, finished_at, status, llm_tokens, llm_cost, step_status = log_row
     audit_skip_reason = _audit_skip_reason(step_status)
+    step_data = _load_json(step_status, {})
+    material_warnings = (
+        [
+            str(value).removeprefix("warning: ")
+            for key, value in step_data.items()
+            if key in {"S1_data", "S5_materials"} and str(value).startswith("warning:")
+        ]
+        if isinstance(step_data, dict)
+        else []
+    )
     if as_of is None:
         as_of = started_at.date() if isinstance(started_at, datetime) else date.today()
 
@@ -537,7 +565,9 @@ def build_weekly_report(
         "audit_skipped": audit_skip_reason is not None,
         "audit_skip_reason": audit_skip_reason,
         "ranked_by": ranked_by,
-        "main_markdown": _main_markdown(ranked, len(veto)),
+        "material_warnings": material_warnings,
+        "main_markdown": _main_markdown(ranked, len(veto))
+        + ("\n公告正文提示：" + "；".join(material_warnings) if material_warnings else ""),
         "footer": f"完整周报：{path}",
         "report_url": path.resolve().as_uri(),
     }
@@ -556,21 +586,18 @@ def build_weekly_report(
     pushed = False
     if push:
         target = channel or create_feishu_channel()
-        if target.configured:
-            try:
-                _push(
-                    target,
-                    payload,
-                    rows,
-                    chart_path=chart_path,
-                    duration=_duration(started_at, finished_at),
-                )
-                pushed = True
-                pushed_at = datetime.now()
-            except FeishuError as exc:
-                log.warning("weekly.push_failed", error=str(exc))
+        pushed = _push(
+            connection,
+            target,
+            payload,
+            rows,
+            chart_path=chart_path,
+            duration=_duration(started_at, finished_at),
+        )
+        if pushed:
+            pushed_at = datetime.now()
         else:
-            log.warning("weekly.push_skipped", reason=target.status)
+            log.warning("weekly.push_pending", run_id=run_id)
 
     connection.execute(
         _REPORT_SQL,

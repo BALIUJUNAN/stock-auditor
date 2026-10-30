@@ -80,6 +80,8 @@ def run_ingest(
     settings: Settings,
     codes: list[str] | None = None,
     client: DataClient | None = None,
+    *,
+    backfill_text: bool = True,
 ) -> IngestSummary:
     """采集股票池、行业、行情、财务、估值、公告、质押、调研、预约与指数。"""
     data_client = client if client is not None else DataClient(settings)
@@ -146,7 +148,11 @@ def run_ingest(
         ),
     )
     try:
-        count, failures = announcements.backfill_announcement_text(connection, data_client)
+        count, failures = (
+            announcements.backfill_announcement_text(connection, data_client)
+            if backfill_text
+            else (0, {})
+        )
         summary.counts["announcement_text"] = count
         missing = connection.execute(
             "SELECT count(*) FROM announcements WHERE text IS NULL OR length(trim(text)) < 100"

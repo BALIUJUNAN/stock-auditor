@@ -18,7 +18,7 @@ def _ensure(connection: duckdb.DuckDBPyConnection) -> None:
         created_at TIMESTAMP DEFAULT current_timestamp, delivered_at TIMESTAMP)""")
 
 
-def enqueue(connection: duckdb.DuckDBPyConnection, card: dict[str, Any], *, key: str) -> None:
+def enqueue(connection: duckdb.DuckDBPyConnection, card: dict[str, Any], *, key: str) -> str:
     _ensure(connection)
     payload = json.dumps(card, ensure_ascii=False, sort_keys=True)
     identifier = hashlib.sha256(key.encode()).hexdigest()
@@ -27,6 +27,7 @@ def enqueue(connection: duckdb.DuckDBPyConnection, card: dict[str, Any], *, key:
         "VALUES (?, ?, 'pending') ON CONFLICT DO NOTHING",
         [identifier, payload],
     )
+    return identifier
 
 
 def deliver(connection: duckdb.DuckDBPyConnection, channel: FeishuChannel | None) -> int:

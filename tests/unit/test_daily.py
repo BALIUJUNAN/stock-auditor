@@ -149,8 +149,12 @@ def test_core_pool_merges_watchlist_and_weekly_scores(
     connection.execute(
         "INSERT INTO run_log (run_id, pipeline, started_at, finished_at, status, "
         "step_status, llm_tokens, llm_cost) "
-        "VALUES (?, 'weekly', ?, ?, 'success', '{}', 0, 0)",
-        [WEEKLY_RUN, NOW - timedelta(days=4), NOW - timedelta(days=4)],
+        "VALUES (?, 'weekly', ?, ?, 'success', ?, 0, 0)",
+        [WEEKLY_RUN, NOW - timedelta(days=4), NOW - timedelta(days=4), '{"S7":"done","S8":"done"}'],
+    )
+    connection.execute(
+        "INSERT INTO weekly_reports (run_id, report_json, markdown) VALUES (?, '{}', 'report')",
+        [WEEKLY_RUN],
     )
     connection.executemany(
         "INSERT INTO final_scores (run_id, code, raw_total, final_total, stars, "
@@ -206,3 +210,54 @@ def test_daily_retries_persisted_alert_after_delivery_failure(connection, tmp_pa
     assert second.triggers == ()
     assert second.pushed_count == 1
     assert len(channel.sent) == 1
+
+
+def test_latest_core_pool_accepts_complete_legacy_announcement_partial(connection, monkeypatch):
+    import json
+
+    from stock_auditor.pipeline.single import latest_run_id
+
+    old = "weekly-old"
+    recent = "weekly-new"
+    for run_id, status, steps, started in (
+        (old, "success", {"S7": "done", "S8": "done"}, NOW - timedelta(days=7)),
+        (
+            recent,
+            "partial",
+            {"S1_data": "failed: missing text", "S7": "done", "S8": "done"},
+            NOW - timedelta(days=1),
+        ),
+    ):
+        connection.execute(
+            "INSERT INTO run_log (run_id,pipeline,started_at,finished_at,status,step_status) "
+            "VALUES (?, 'weekly', ?, ?, ?, ?)",
+            [run_id, started, started, status, json.dumps(steps)],
+        )
+    connection.execute(
+        "INSERT INTO weekly_reports (run_id, report_json, markdown) VALUES (?, '{}', 'report')",
+        [recent],
+    )
+    connection.execute(
+        "INSERT INTO weekly_reports (run_id, report_json, markdown) VALUES (?, '{}', 'report')",
+        [old],
+    )
+    connection.execute(
+        "INSERT INTO final_scores (run_id, code, raw_total, final_total, stars, is_veto) "
+        "VALUES (?, '000002', 80, 80, 4, false)",
+        [recent],
+    )
+    monkeypatch.setattr(
+        "stock_auditor.pipeline.core.load_watchlist", lambda max_entries: SimpleNamespace(codes=())
+    )
+    assert latest_run_id(connection, "weekly", as_of=AS_OF) == recent
+    assert core_pool(connection, load_settings(), as_of=AS_OF) == ("000002",)
+    connection.execute(
+        "UPDATE run_log SET step_status=? WHERE run_id=?",
+        [json.dumps({"S1_data": "failed: text", "S7": "failed: scores", "S8": "done"}), recent],
+    )
+    assert latest_run_id(connection, "weekly", as_of=AS_OF) == old
+    connection.execute(
+        "UPDATE run_log SET status='success', step_status=? WHERE run_id=?",
+        [json.dumps({"S1": "done", "S2": "done"}), recent],
+    )
+    assert latest_run_id(connection, "weekly", as_of=AS_OF) == old

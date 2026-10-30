@@ -422,3 +422,30 @@ def test_weekly_does_not_report_missing_peg_without_marker(connection, tmp_path,
     report = build_weekly_report(connection, RUN_ID, as_of=AS_OF, push=False)
     assert report.payload["top"][0]["peg_unavailable"] is False
     assert "PEG 暂未评分" not in report.markdown
+
+
+def test_weekly_partial_delivery_retries_only_failed_cards(connection, tmp_path, monkeypatch):
+    from stock_auditor.pipeline.outbox import deliver
+
+    monkeypatch.setenv("SA_HOME", str(tmp_path))
+
+    class IntermittentChannel(RecordingChannel):
+        calls = 0
+
+        def send_card(self, card):
+            self.calls += 1
+            if self.calls == 2:
+                raise FeishuError("temporary failure")
+            return super().send_card(card)
+
+    channel = IntermittentChannel()
+    report = build_weekly_report(connection, RUN_ID, as_of=AS_OF, push=True, channel=channel)
+    assert not report.pushed
+    assert len(channel.cards) == 2
+    assert (
+        connection.execute("SELECT count(*) FROM alert_outbox WHERE status='pending'").fetchone()[0]
+        == 1
+    )
+    assert deliver(connection, channel) == 1
+    assert len(channel.cards) == 3
+    assert deliver(connection, channel) == 0

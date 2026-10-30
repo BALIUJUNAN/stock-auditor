@@ -38,6 +38,8 @@ from stock_auditor.funnel import (
     store_llm_pool,
 )
 from stock_auditor.ingest import run_ingest
+from stock_auditor.ingest.announcements import backfill_announcement_text
+from stock_auditor.ingest.common import DataClient
 from stock_auditor.llm.audit import (
     LlmCompleter,
     Tier1Outcome,
@@ -788,9 +790,10 @@ def run_weekly(
                         connection,
                         settings,
                         codes=list(codes) if codes is not None else None,
+                        backfill_text=False,
                     )
                     if summary.warnings.get("announcement_text"):
-                        context.fail_step("S1_data", summary.warnings["announcement_text"])
+                        context.warn_step("S1_data", summary.warnings["announcement_text"])
                     if summary.errors:
                         failed = "；".join(
                             f"{key}: {value}" for key, value in summary.errors.items()
@@ -911,6 +914,23 @@ def run_weekly(
                         run_id=context.run_id,
                         reason=llm_skip_reason,
                     )
+
+            # Refresh candidate materials after selection, before assembling Tier-1.
+            if refresh and llm is not None and _reached("S5", target) and "S5" not in completed:
+                try:
+                    _, failures = backfill_announcement_text(
+                        connection,
+                        DataClient(settings),
+                        codes=[item.code for item in pool],
+                        as_of=run_date,
+                        lookback_days=settings.llm.material_lookback_days,
+                    )
+                    if failures:
+                        context.warn_step("S5_materials", f"{len(failures)} 公告正文获取失败")
+                    universe = load_universe(connection, as_of=run_date, codes=codes)
+                except Exception as exc:
+                    context.warn_step("S5_materials", f"候选公告正文补全失败: {exc}")
+                    log.warning("pipeline.weekly.materials_failed", error=str(exc))
 
             if _reached("S5", target):
                 if "S5" in completed:
