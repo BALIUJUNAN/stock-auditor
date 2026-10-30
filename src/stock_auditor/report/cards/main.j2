@@ -1,0 +1,16 @@
+{
+  "schema": "2.0",
+  "config": {"update_multi": true},
+  "header": {
+    "title": {"tag": "plain_text", "content": {{ ("本周审计 Top 3 · " ~ report.as_of) | tojson }}},
+    "template": "blue"
+  },
+  "body": {
+    "elements": [
+      {"tag": "markdown", "content": {{ report.main_markdown | tojson }}},
+      {% if image_key %}{"tag": "img", "img_key": {{ image_key | tojson }}, "alt": {"tag": "plain_text", "content": "周报得分图"}},{% endif %}
+      {% if show_button %}{"tag": "button", "text": {"tag": "plain_text", "content": "查看完整周报"}, "type": "primary", "behaviors": [{"type": "open_url", "default_url": {{ report.report_url | tojson }}}]},{% endif %}
+      {"tag": "markdown", "content": {{ report.footer | tojson }}}
+    ]
+  }
+}

@@ -1,0 +1,146 @@
+# 默认配置。加载顺序：本文件 → config/local/settings.local.yaml → 环境变量 SA__分组__键。
+# 所有阈值、权重、天数、比例都必须写在这里，代码里不得出现魔法数字。
+
+universe:
+  boards: [sh_main, sz_main, chinext, star]   # 默认不含北交所
+  exclude_name_keywords: ["ST", "*ST", "退"]
+  min_listing_days: 365
+  exclude_sw_l1: [银行, 非银金融, 房地产]        # 申万 2021 版一级行业
+  focus_sw_l1: [医药生物, 电子, 计算机]
+
+stage0:
+  turnover_window: 20            # 按近 20 日平均换手率
+  turnover_min: 0.03
+  turnover_max: 0.20
+  min_avg_amount_cny: 50000000   # 近 20 日日均成交额 ≥ 5000 万
+  max_suspended_days_20: 5       # 近 20 日停牌超过 5 天剔除
+
+veto:
+  regulatory_lookback_days: 365  # 处罚或谴责公告后 12 个月内视为处于期内
+  pledge_ratio_max: 0.70
+  pledge_missing_label: "质押数据不全"
+  keywords:
+    investigation: [立案告知书, 立案调查]
+    investigation_closed: [结案, 终止调查]
+    regulatory_penalty: [行政处罚决定书, 公开谴责]
+  cash_debt_both_high: { cash_to_assets: 0.20, interest_debt_to_assets: 0.20 }
+  receivable_inflation: { growth_gap: 0.30, ar_to_revenue: 0.50 }
+
+soft_downgrade:
+  cap: 69
+  penalty_cfo_or_auditor_change: 10
+  cfo_lookback_days: 90
+  penalty_negative_ocf: 10
+  negative_ocf_revenue_growth_min: 0.20
+  penalty_llm_critical_risk: 10
+  keywords:
+    cfo_or_auditor_change: [财务总监辞职, 财务负责人辞职, 变更会计师事务所]
+
+fundamental:
+  min_industry_sample: 10        # 申万二级样本不足 10 只时改用一级
+  history_years: 5
+  imputed_discount: 0.85
+  default_peg_cap: 1.0           # 不在 PEG 表中的行业
+  min_analyst_count: 3           # 少于 3 家机构覆盖视为一致预期缺失
+  revenue_cagr_years: 3          # 营收 CAGR 年数
+  history_min_valid_days: 600    # 历史分位最少有效交易日
+  consensus_source: akshare      # 过渡期一致预期来源
+  percentile_method: average_rank
+
+momentum:
+  overheat_r5: 0.15
+  overheat_dev_ma20: 0.15
+  pullback_drawdown_min: 0.10
+  pullback_drawdown_max: 0.35
+  shrink_volume_ratio: 0.8
+  stabilize_rebound: 0.03
+  breakdown_volume_ratio: 1.5
+  breakdown_confirm_days: 3
+  breakdown_lookback_days: 5
+  breakdown_penalty: 10
+  ma_short: 5
+  ma_mid: 20
+  ma_long: 60
+  low_window: 10
+  high_window: 60
+  low_position_r20_max: 0.10
+
+score:
+  star5: 85
+  star4: 75
+  evidence_chain_min: 75
+
+funnel:
+  quant_top_n: 50
+  llm_pool_max: 75
+  watchlist_max: 20
+  supplement: { focus_value: 10, announcements: 5, research_visits: 5 }
+  announcement_lookback_days: 14
+  major_announcement_keywords: [重大合同, 并购重组, 业绩预增, 新药获批, 临床试验]
+  research_lookback_days: 30
+  research_min_visits: 3
+  research_max_r20: 0.05
+
+llm:
+  base_url: ""                   # 模型服务商待定
+  tier1_model: ""
+  tier2_model: ""
+  temperature: 0
+  max_retries: 2
+  tier1_input_token_budget: 60000
+  material_lookback_days: 90
+  token_estimate:
+    cjk_chars_per_token: 1.0     # 中文 1 字 = 1 token
+    ascii_chars_per_token: 3.5   # 英文/数字 3.5 字符 = 1 token
+    safety_margin: 0.10          # 额外预留 10%
+
+schedule:
+  timezone: Asia/Shanghai
+  weekly: "sun 20:00"
+  daily: "mon-fri 16:30"
+  misfire_grace_hours: 12
+
+daily_watch:
+  abs_change_alert: 0.07
+
+earnings:
+  warn_trading_days_before: 7
+
+retention:
+  dossier_full_days: 180
+  filter_log_days: 90
+
+tracking:
+  horizons: [20, 60]
+  benchmark: "000300"
+  sector_benchmarks: { 医药生物: "801150", 电子: "801080", 计算机: "801750" }
+
+backfill:
+  years: 5
+
+data_quality:
+  cross_validation:
+    max_deviation: 0.05
+    missing_label: "未交叉验证"
+    suspect_label: "数据存疑"
+
+commercial:
+  enabled: false                 # 商业源是可选插件，客户后续购买
+  provider: ""
+  prefer_http: true
+  allow_windows_only_sdk: true
+
+ingest:
+  announcement_pdf: true
+  skip_scanned_pdf: true
+  cache_by_ann_id: true
+  request_interval_seconds: 0.5  # 两次接口调用之间的最小间隔
+  max_retries: 3                 # 单次接口调用的最大尝试次数
+  retry_backoff_seconds: 1.0     # 指数退避基数
+  daily_lookback_days: 900       # 日线/指数回看天数（覆盖 600 个有效交易日）
+  financial_periods: 20          # 财务数据保留的报告期数（约 5 年）
+  valuation_years: 5             # 估值历史年数
+  announcement_lookback_days: 180
+  research_lookback_days: 365
+  research_max_pages: 2          # 每只股票最多抓取的调研页数（每页 50 条）
+  pledge_snapshot_lookback_days: 21  # 向前寻找最近一期质押快照的天数

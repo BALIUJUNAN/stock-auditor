@@ -1,0 +1,5 @@
+# 行业 PEG 容限映射。match_sw_l2 为申万 2021 版二级行业名称。
+- { name: 创新药, match_sw_l2: [化学制药, 生物制品], peg_cap: 2.5, revenue_cagr_min: 0.25 }
+- { name: 半导体, match_sw_l2: [半导体],              peg_cap: 1.8, revenue_cagr_min: 0.20 }
+- { name: 云计算, match_sw_l2: [软件开发, IT服务],    peg_cap: 1.5, revenue_cagr_min: 0.25 }
+- { name: 食品,   match_sw_l2: [食品加工, 休闲食品],  peg_cap: 0.8, revenue_cagr_min: 0.08 }

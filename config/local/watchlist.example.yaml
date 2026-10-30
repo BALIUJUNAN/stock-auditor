@@ -1,0 +1,9 @@
+# 持仓与关注名单示例。复制为 watchlist.yaml 后填写，该文件不进 Git、不打包。
+# 关注名单（watchlist）上限见 funnel.watchlist_max，默认 20 只。
+#
+# 列表元素：
+# - code: "000000"      # 6 位股票代码
+#   name: "示例"         # 股票简称，仅用于展示
+#   note: "备注"         # 可选
+holdings: []
+watchlist: []

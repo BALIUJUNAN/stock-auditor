@@ -1,0 +1,35 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    name: ${{ matrix.os }} / Python 3.12
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - windows-latest
+          - ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+          enable-cache: true
+
+      - name: 安装依赖
+        run: uv sync --frozen
+
+      - name: 代码检查
+        run: uv run ruff check src tests
+
+      - name: 单元测试
+        run: uv run pytest
+
+      - name: 交付打包扫描
+        run: uv run sa package --output dist/stock-auditor.zip --force

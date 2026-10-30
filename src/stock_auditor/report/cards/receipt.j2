@@ -1,0 +1,13 @@
+{
+  "schema": "2.0",
+  "config": {"update_multi": true},
+  "header": {
+    "title": {"tag": "plain_text", "content": "周流水线运行回执"},
+    "template": "grey"
+  },
+  "body": {
+    "elements": [
+      {"tag": "markdown", "content": {{ ("- 运行编号：" ~ run_id ~ "\n- 状态：" ~ status ~ "\n- 耗时：" ~ duration ~ "\n- LLM token：" ~ llm_tokens ~ "\n- LLM 费用：" ~ llm_cost ~ " 元") | tojson }}}
+    ]
+  }
+}

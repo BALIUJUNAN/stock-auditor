@@ -1,0 +1,14 @@
+{
+  "schema": "2.0",
+  "config": {"update_multi": true},
+  "header": {
+    "title": {"tag": "plain_text", "content": {{ (name ~ " " ~ code ~ " · " ~ title) | tojson }}},
+    "template": "orange"
+  },
+  "body": {
+    "elements": [
+      {"tag": "markdown", "content": {{ ("**" ~ title ~ "**\n\n" ~ detail ~ "\n\n日期：" ~ as_of) | tojson }}}{% if buttons %},
+      {"tag": "action", "actions": [{% for button in buttons %}{"tag": "button", "text": {"tag": "plain_text", "content": {{ button.label | tojson }}}, "type": "default", "behaviors": [{"type": "callback", "value": {"action": {{ button.action | tojson }}, "code": {{ code | tojson }}}}]}{% if not loop.last %},{% endif %}{% endfor %}]}{% endif %}
+    ]
+  }
+}
